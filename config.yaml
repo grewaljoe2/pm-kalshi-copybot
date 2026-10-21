@@ -69,14 +69,17 @@ bankroll:
     - name: "1 growth"
       up_to: 300
       max_game_pct: 0.15
+      max_open_pct: 1.0       # growth stage: whole balance can be in play
       tiers: [[80, 0.12], [65, 0.07], [45, 0.04]]
     - name: "2 taper"
       up_to: 1000
       max_game_pct: 0.12
+      max_open_pct: 0.9
       tiers: [[80, 0.08], [65, 0.05], [45, 0.03]]
     - name: "3 protect"
       up_to: null
       max_game_pct: 0.08
+      max_open_pct: 0.8
       tiers: [[80, 0.05], [65, 0.035], [50, 0.02]]
   drawdown_brake_pct: 0.30  # 30% below peak -> use stage 3 sizing until it recovers
   min_ev: 0.0               # skip bets with negative expected value after fees

@@ -789,7 +789,7 @@ class CopyBot:
             return 0.0, "daily loss stop reached"
         budget = eq * pct
         budget = min(budget, eq * self.current_stage().get("max_game_pct", b.get("max_game_pct", 0.08)) - held_usd)
-        budget = min(budget, eq * b.get("max_open_pct", 0.7) - self.open_cost())
+        budget = min(budget, eq * self.current_stage().get("max_open_pct", b.get("max_open_pct", 0.7)) - self.open_cost())
         budget = min(budget, self.cash())
         if budget < b.get("min_stake_usd", 2.0):
             return 0.0, "bankroll limits leave no room"
