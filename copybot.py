@@ -379,24 +379,54 @@ class Kalshi:
     def create_order(self, ticker: str, side: str, action: str, count: int,
                      price: float, tif: str | None, post_only: bool = False,
                      expiration_ts: int | None = None) -> dict:
+        """Kalshi Create Order V2 (POST /portfolio/events/orders).
+
+        V2 orders are always on the YES leg: 'bid' buys YES, 'ask' sells YES. So buying NO at q
+        is an ask at (1 - q), and selling NO at q is a bid at (1 - q).
+        """
+        if side == "yes":
+            v2_side, v2_price = ("bid" if action == "buy" else "ask"), price
+        else:
+            v2_side, v2_price = ("ask" if action == "buy" else "bid"), 1.0 - price
         body = {
             "ticker": ticker,
             "client_order_id": str(uuid.uuid4()),
-            "side": side,                # "yes" | "no"
-            "action": action,            # "buy" | "sell"
-            "count": int(count),
-            "type": "limit",
-            f"{side}_price_dollars": f"{price:.4f}",
+            "side": v2_side,
+            "count": f"{int(count)}",
+            "price": f"{v2_price:.4f}",
+            "time_in_force": tif or "good_till_canceled",
+            "self_trade_prevention_type": "taker_at_cross",
         }
-        if tif:
-            body["time_in_force"] = tif
-        if post_only:
-            body["post_only"] = True     # rest on the book as a maker; never take
-        if expiration_ts:
-            body["expiration_ts"] = int(expiration_ts)
         if action == "sell":
-            body["reduce_only"] = True
-        return self._req("POST", "/portfolio/orders", json=body)["order"]
+            body["time_in_force"] = "immediate_or_cancel"
+            body["reduce_only"] = True  # V2 allows reduce_only only with IOC
+        if post_only:
+            body["post_only"] = True
+        if expiration_ts and body["time_in_force"] == "good_till_canceled":
+            body["expiration_time"] = int(expiration_ts)
+        res = self._req("POST", "/portfolio/events/orders", json=body)
+        filled = float(res.get("fill_count") or 0)
+        remaining = float(res.get("remaining_count") or 0)
+        status = "executed" if remaining <= 0 and filled > 0 else (
+            "resting" if body["time_in_force"] == "good_till_canceled" and remaining > 0 else "canceled")
+        return {"order_id": res.get("order_id"), "fill_count": filled, "remaining_count": remaining,
+                "status": status, "average_fill_price": res.get("average_fill_price"),
+                "average_fee_paid": res.get("average_fee_paid"), "raw": res}
+
+    def get_order(self, order_id: str) -> dict:
+        try:
+            return self._req("GET", f"/portfolio/orders/{order_id}")["order"]
+        except Exception:
+            # fallback: add up fills for this order
+            j = self._req("GET", "/portfolio/fills", params={"order_id": order_id, "limit": 200})
+            n = sum(float(f.get("count_fp") or f.get("count") or 0) for f in j.get("fills", []))
+            return {"fill_count": n, "status": "unknown"}
+
+    def cancel_order(self, order_id: str) -> None:
+        try:
+            self._req("DELETE", f"/portfolio/events/orders/{order_id}")
+        except Exception:
+            self._req("DELETE", f"/portfolio/orders/{order_id}")
 
     def collections(self) -> list[dict]:
         out, cursor = [], None
@@ -416,11 +446,7 @@ class Kalshi:
         return self._req("POST", f"/multivariate_event_collections/{collection_ticker}",
                          json={"selected_markets": legs})
 
-    def get_order(self, order_id: str) -> dict:
-        return self._req("GET", f"/portfolio/orders/{order_id}")["order"]
 
-    def cancel_order(self, order_id: str) -> None:
-        self._req("DELETE", f"/portfolio/orders/{order_id}")
 
 
 def kalshi_fee(count: int, price: float, rate: float = 0.07) -> float:
