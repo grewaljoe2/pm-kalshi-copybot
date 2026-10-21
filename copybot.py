@@ -1255,6 +1255,9 @@ class CopyBot:
         cc = self.cfg.get("combos", {}) or {}
         if not cc.get("enabled", False) or self.paused or not self.kalshi.pkey:
             return
+        if not self.state.data.get("combo_reset_v1"):  # switched weekly -> daily with props: run now
+            self.state.data["combo_reset_v1"] = True
+            self.state.data["combo_last"] = 0
         last = float(self.state.data.get("combo_last", 0) or 0)
         if time.time() - last < cc.get("every_days", 7) * 86400:
             return
