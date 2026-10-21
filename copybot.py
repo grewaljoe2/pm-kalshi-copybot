@@ -221,8 +221,14 @@ class Polymarket:
         d = r.json()
         return d if isinstance(d, list) else d.get("data", [])
 
-    def game_start(self, condition_id: str) -> float | None:
-        """Game start (unix seconds) from Polymarket's market data, if it has one."""
+    _info_cache: dict = {}
+
+    def market_info(self, condition_id: str) -> dict:
+        """Game start time and current prices per outcome from Polymarket (cached 5 min)."""
+        hit = self._info_cache.get(condition_id)
+        if hit and time.time() - hit[0] < 300:
+            return hit[1]
+        info: dict = {"start": None, "prices": {}}
         try:
             r = self.s.get("https://gamma-api.polymarket.com/markets",
                            params={"condition_ids": condition_id}, timeout=15)
@@ -233,15 +239,25 @@ class Polymarket:
             for v in (m.get("gameStartTime"), m.get("game_start_time"), ev.get("startTime"),
                       ev.get("gameStartTime"), m.get("eventStartTime")):
                 if v:
-                    txt = str(v).replace(" ", "T").replace("Z", "+00:00")
-                    if len(txt) >= 22 and txt[-3] != ":" and txt[-5] in "+-":
-                        txt = txt[:-2] + ":" + txt[-2:]
+                    txt = str(v).strip().replace(" ", "T").replace("Z", "+00:00")
                     if re.search(r"[+-]\d\d$", txt):
                         txt += ":00"
-                    return datetime.fromisoformat(txt).timestamp()
+                    try:
+                        info["start"] = datetime.fromisoformat(txt).timestamp()
+                        break
+                    except ValueError:
+                        continue
+            outs, prices = m.get("outcomes"), m.get("outcomePrices")
+            outs = json.loads(outs) if isinstance(outs, str) else (outs or [])
+            prices = json.loads(prices) if isinstance(prices, str) else (prices or [])
+            info["prices"] = {str(o): float(p) for o, p in zip(outs, prices)}
         except Exception as e:
-            log.debug("gamma start lookup failed: %s", e)
-        return None
+            log.debug("gamma lookup failed: %s", e)
+        self._info_cache[condition_id] = (time.time(), info)
+        return info
+
+    def game_start(self, condition_id: str) -> float | None:
+        return self.market_info(condition_id)["start"]
 
     def position_size(self, wallet: str, condition_id: str, outcome: str) -> float:
         r = self.s.get(f"{POLY_DATA}/positions",
@@ -770,6 +786,8 @@ class CopyBot:
                 continue  # price moved, game likely started, or unusable
             if 100 * self.fee_rate * (1 - ask) > self.risk.get("max_fee_pct", 6):
                 continue
+            if p.get("status") != "pre":
+                continue  # only bet games confirmed not to have started
             log.info("[Board] %s %s -> %s %s  score %d EV %+.1f%%  (%d traders: %s)", p["title"], p["outcome"],
                      p["ticker"], p["side"].upper(), p["score"], 100 * p["ev"], p["whales"], ", ".join(p["names"]))
             budget, why = self._bankroll_budget(p["score"], p["ev"], 0.0)
@@ -826,6 +844,17 @@ class CopyBot:
         offset = 4 if mm.group(3) == "EDT" else 5
         return dt.replace(tzinfo=timezone.utc).timestamp() + offset * 3600
 
+    def game_status(self, cond: str, kalshi_market: dict, game_date) -> str:
+        """'pre' (safe to bet), 'started', or 'unknown' (same-day game with no start time)."""
+        start = self.pm.game_start(cond) or self._kalshi_start(kalshi_market)
+        buffer = (self.cfg.get("catch_up", {}) or {}).get("min_minutes_before", 10) * 60
+        if start is not None:
+            return "started" if time.time() > start - buffer else "pre"
+        today = datetime.now(timezone.utc).date()
+        if game_date is not None and game_date > today:
+            return "pre"
+        return "unknown"
+
     def catch_up(self) -> None:
         """Copy followed whales' open bets on games that haven't started yet (bets made before we watched)."""
         cc = self.cfg.get("catch_up", {}) or {}
@@ -873,11 +902,10 @@ class CopyBot:
                     km = self.kdata.market(tgt.ticker)
                 except Exception:
                     continue
-                start = self.pm.game_start(cond) or self._kalshi_start(km)
-                if start is None:
-                    if c["date"] <= today:
-                        continue  # same-day game with unknown start time: don't risk copying a live game
-                elif time.time() > start - cc.get("min_minutes_before", 10) * 60:
+                status = self.game_status(cond, km, c["date"])
+                if status == "unknown":
+                    continue  # same-day game with unknown start time: don't risk copying a live game
+                if status == "started":
                     done[key] = time.time()  # started (or about to): never copy
                     continue
                 log.info("[%s] CATCH-UP open bet %s '%s' $%.0f now %.0fc", name, out, t["title"], value, 100 * cur)

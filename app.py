@@ -232,11 +232,11 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
 <div><div class="k">Return</div><div class="v">{{ '%+.1f'|format(100 * (st.equity / st.start_usd - 1)) }}%</div></div>
 <div><div class="k">Open bets</div><div class="v">{{ st.open_lots }}</div></div></div></div>{% endif %}
 <div class="card"><h2>Best bets now</h2>
-{% if best.bets %}<div class="scroll"><table><tr><th>Bet</th><th>Whales</th><th>Whale ¢</th><th>Kalshi ¢</th><th>Score</th><th>EV</th><th>Stake</th></tr>
+{% if best.bets %}<div class="scroll"><table><tr><th>Bet</th><th>Whales</th><th>Poly ¢ now</th><th>Kalshi ¢</th><th>Score</th><th>EV</th><th>Stake</th></tr>
 {% for b in best.bets[:12] %}<tr><td>{{ b.title }}<br><span class="k">{{ b.outcome }} → {{ b.ticker }} {{ b.side|upper }}</span></td>
-<td>{{ b.whales }}<br><span class="k">${{ '{:,}'.format(b.whale_usd) }}</span></td><td>{{ '%.0f'|format(100*b.whale_px) }}</td><td>{{ '%.0f'|format(100*b.ask) }}</td>
+<td>{{ b.whales }}<br><span class="k">${{ '{:,}'.format(b.whale_usd) }}</span>{% if b.status == 'unknown' %}<br><span class="k">start time?</span>{% endif %}</td><td>{{ '%.0f'|format(100*b.whale_px) }}</td><td>{{ '%.0f'|format(100*b.ask) }}</td>
 <td><b>{{ b.score }}</b></td><td class="{{ 'ok' if b.ev > 0 else 'bad' }}">{{ '%+.1f'|format(100*b.ev) }}%</td><td>{{ '$%.2f'|format(b.stake) if b.stake else '—' }}</td></tr>{% endfor %}
-</table></div><div class="k" style="margin-top:6px">Whale bets from the last 24h on games still open on Kalshi. Refreshes every 10 min.</div>
+</table></div><div class="k" style="margin-top:6px">Whale bets from the last 24h on games that haven't started. EV compares Kalshi with Polymarket's price now. Refreshes every 10 min.</div>
 {% else %}<div class="k">Building the list (a few minutes after a restart)…</div>{% endif %}</div>
 <div class="card"><h2>Today's slate</h2>
 {% if slate %}<div class="grid">
@@ -505,10 +505,16 @@ def compute_best() -> list[dict]:
         ask = copybot._px(m, f"{side}_ask")
         if not ask or ask <= 0 or ask >= 1:
             continue
+        cls = BOT.sports.classify(t) or {}
+        status = BOT.game_status(cond, m, cls.get("date"))
+        if status == "started":
+            continue  # never show games already being played
         whales = {x["w"] for x in bs}
         opp = {x["w"] for x in pool if x["cond"] == cond and x["out"] != outc} - whales
         usd = sum(x["usd"] for x in bs)
-        px = sum(x["px"] * x["usd"] for x in bs) / usd if usd else sample["px"]
+        paid = sum(x["px"] * x["usd"] for x in bs) / usd if usd else sample["px"]
+        now_px = BOT.pm.market_info(cond)["prices"].get(str(outc))
+        px = now_px if now_px and 0.02 < now_px < 0.98 else paid  # fair price = Polymarket now
         best_stats = max((BOT.whale_stats.get(w) or {} for w in whales),
                          key=lambda s: s.get("pnl_all") or 0, default=None)
         sc = score_bet(whale_px=px, ask=ask, whale_usd=sample["usd"], stats=best_stats or None,
@@ -519,9 +525,10 @@ def compute_best() -> list[dict]:
         out.append({"title": sample["title"], "outcome": outc, "whales": len(whales),
                     "latest_ts": max(x["ts"] for x in bs),
                     "names": sorted({x["name"] for x in bs})[:4], "whale_usd": round(usd),
-                    "whale_px": round(px, 3), "ticker": tk, "side": side, "ask": round(ask, 3),
+                    "whale_px": round(px, 3), "paid_px": round(paid, 3), "status": status,
+                    "ticker": tk, "side": side, "ask": round(ask, 3),
                     "score": sc["score"], "ev": sc["ev"],
-                    "stake": round(BOT.equity() * pct, 2) if sc["ev"] >= 0 else 0})
+                    "stake": round(BOT.equity() * pct, 2) if sc["ev"] >= 0 and status == "pre" else 0})
     out.sort(key=lambda x: (-x["score"], -x["ev"]))
     return out[:20]
 
