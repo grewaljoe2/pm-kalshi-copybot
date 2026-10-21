@@ -508,6 +508,21 @@ class CopyBot:
             self.state.data.pop("peak_equity", None)
             log.warning("Mode changed %s -> %s: previous ledger archived, starting clean", last_mode, self.mode)
         self.state.data["ledger_mode"] = self.mode
+        # One-time cleanup: paper data left in a live ledger by an older version (no live bets yet)
+        if (self.mode == "live" and not self.state.data.get("migr_paper_v1")
+                and not any(e.get("mode") == "live" for e in self.state.data.get("events", []))
+                and (self.state.data.get("lots") or self.state.data.get("events"))):
+            arch = self.state.data.setdefault("archive", {})
+            arch[f"paper_cleanup_{int(time.time())}"] = {
+                k: self.state.data.get(k) for k in ("lots", "closed", "events", "positions", "spent_by_day",
+                                                    "day_equity", "peak_equity", "catchup_done", "board_done")}
+            for k, v in (("lots", []), ("closed", []), ("events", []), ("positions", {}), ("spent_by_day", {}),
+                         ("day_equity", {}), ("catchup_done", {}), ("board_done", {})):
+                self.state.data[k] = v
+            self.state.data.pop("peak_equity", None)
+            log.warning("Paper bets found in the live ledger: archived, starting clean")
+        if self.mode == "live":
+            self.state.data["migr_paper_v1"] = True
         self.whale_stats: dict = self.state.data.get("whale_stats", {})  # wallet -> screener stats
         self.screen_buys: list = []  # recent buys of other top whales (from the screener)
         self.bank = cfg.get("bankroll", {}) or {}
