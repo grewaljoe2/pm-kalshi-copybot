@@ -548,6 +548,7 @@ def _best_loop():
             BEST.update(bets=bets, updated=time.time())
             if BOT is not None:
                 BOT.board_queue = list(bets)  # bot thread decides which to auto-bet
+                BOT.combo_picks = list(bets)  # bot thread builds the weekly combo
             log.info("BEST %s", json.dumps(bets[:8], default=str))
         except Exception as e:
             log.warning("best bets failed: %s", e)

@@ -70,6 +70,16 @@ limit_orders:
   cancel_before_start_minutes: 5
   check_seconds: 30
 
+# Weekly whale combo: 2-3 of the week's best pre-game picks in one Kalshi combo, small stake.
+combos:
+  enabled: true
+  dry_run: true             # log what it would bet; set false after checking the logs
+  every_days: 7
+  min_legs: 2
+  max_legs: 3
+  min_score: 70
+  stake_pct: 0.02           # 2% of balance per week
+
 # Bankroll mode (sizing: score). Paper mode tracks a virtual bankroll starting here.
 bankroll:
   start_usd: 98.49          # live: your deposit (used for the Return %)

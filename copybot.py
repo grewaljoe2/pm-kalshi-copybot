@@ -398,6 +398,24 @@ class Kalshi:
             body["reduce_only"] = True
         return self._req("POST", "/portfolio/orders", json=body)["order"]
 
+    def collections(self) -> list[dict]:
+        out, cursor = [], None
+        for _ in range(10):
+            p = {"status": "open", "limit": 200}
+            if cursor:
+                p["cursor"] = cursor
+            j = self._req("GET", "/multivariate_event_collections", params=p)
+            out += j.get("multivariate_contracts") or j.get("multivariate_event_collections") or j.get("collections") or []
+            cursor = j.get("cursor")
+            if not cursor:
+                break
+        return out
+
+    def create_combo(self, collection_ticker: str, legs: list[dict]) -> dict:
+        """legs: [{event_ticker, market_ticker, side}] -> {market_ticker, event_ticker} of the combo."""
+        return self._req("POST", f"/multivariate_event_collections/{collection_ticker}",
+                         json={"selected_markets": legs})
+
     def get_order(self, order_id: str) -> dict:
         return self._req("GET", f"/portfolio/orders/{order_id}")["order"]
 
@@ -539,6 +557,7 @@ class CopyBot:
         self.screen_buys: list = []  # recent buys of other top whales (from the screener)
         self.bank = cfg.get("bankroll", {}) or {}
         self.board_queue: list = []
+        self.combo_picks: list = []
         self.kalshi_link: dict = {"linked": False, "detail": "no API key set"}
 
     # ---- pause switch (persisted, toggled from the dashboard) ------------ #
@@ -596,6 +615,12 @@ class CopyBot:
                 self.process_board_queue()
             except Exception as e:
                 log.warning("board picks failed: %s", e)
+            if self.combo_picks:
+                picks, self.combo_picks = self.combo_picks, []
+                try:
+                    self.weekly_combo(picks)
+                except Exception as e:
+                    log.warning("weekly combo failed: %s", e)
             if time.time() - getattr(self, "_last_resting", 0) > self.cfg.get("limit_orders", {}).get("check_seconds", 30):
                 self._last_resting = time.time()
                 try:
@@ -1120,6 +1145,111 @@ class CopyBot:
                 self._copy_buy(name, whale, t, tgt, cur, value)
                 if (len(self.state.data["lots"]), len(self.state.data.get("resting", []))) != before:
                     done[key] = time.time()
+
+    # ---- weekly whale combo ----------------------------------------------- #
+    _coll_cache: tuple = (0.0, [])
+
+    def weekly_combo(self, picks: list[dict]) -> None:
+        """Build a 2-3 leg Kalshi combo from the week's best pre-game picks (small, capped stake)."""
+        from scoring import fee_per_contract
+        cc = self.cfg.get("combos", {}) or {}
+        if not cc.get("enabled", False) or self.paused or not self.kalshi.pkey:
+            return
+        last = float(self.state.data.get("combo_last", 0) or 0)
+        if time.time() - last < cc.get("every_days", 7) * 86400:
+            return
+        legs, events = [], set()
+        for p in sorted(picks, key=lambda x: (-x["score"], -x["ev"])):
+            if (p.get("status") != "pre" or p["score"] < cc.get("min_score", 70) or p["ev"] <= 0
+                    or p["side"] != "yes" or not 0.25 <= p["ask"] <= 0.80):
+                continue
+            try:
+                m = self.kdata.market(p["ticker"])
+            except Exception:
+                continue
+            ev = m.get("event_ticker")
+            if not ev or ev in events:
+                continue
+            events.add(ev)
+            legs.append({"event_ticker": ev, "market_ticker": p["ticker"], "side": "yes",
+                         "fair": p["whale_px"], "title": f'{p["title"]} — {p["outcome"]}',
+                         "start": self._kalshi_start(m)})
+            if len(legs) >= cc.get("max_legs", 3):
+                break
+        if len(legs) < cc.get("min_legs", 2):
+            return
+        # find a collection that allows all these events
+        if time.time() - self._coll_cache[0] > 6 * 3600:
+            try:
+                self._coll_cache = (time.time(), self.kalshi.collections())
+            except Exception as e:
+                log.warning("combo: collections lookup failed: %s", e)
+                return
+        want = {l["event_ticker"] for l in legs}
+        coll = None
+        for c in self._coll_cache[1]:
+            evs = {e.get("event_ticker") if isinstance(e, dict) else e
+                   for e in (c.get("associated_events") or c.get("associated_event_tickers") or [])}
+            if want <= evs and c.get("size_min", 2) <= len(legs) <= c.get("size_max", 10):
+                coll = c
+                break
+        if not coll:
+            log.info("COMBO no Kalshi collection allows these legs: %s", [l["market_ticker"] for l in legs])
+            self.state.data["combo_last"] = time.time() - (cc.get("every_days", 7) - 1) * 86400  # retry tomorrow
+            return
+        try:
+            res = self.kalshi.create_combo(coll["collection_ticker"],
+                                           [{k: l[k] for k in ("event_ticker", "market_ticker", "side")} for l in legs])
+            combo_tk = res.get("market_ticker")
+            cm = self.kdata.market(combo_tk) if combo_tk else {}
+        except Exception as e:
+            log.warning("combo: create failed: %s", e)
+            return
+        fair = 1.0
+        for l in legs:
+            fair *= l["fair"]
+        ask = _px(cm, "yes_ask")
+        stake = self.equity() * cc.get("stake_pct", 0.02)
+        price = math.floor(fair * 100) / 100
+        take = ask is not None and 0 < ask <= fair - fee_per_contract(ask, self.fee_rate)
+        px = ask if take else price
+        count = math.floor(stake / px) if px and px > 0 else 0
+        log.info("COMBO %s legs=%s fair=%.3f kalshi_ask=%s -> %s %d @ %.2f (stake $%.2f)%s",
+                 combo_tk, [l["title"] for l in legs], fair, ask, "TAKE" if take else "LIMIT", count, px or 0,
+                 stake, "  [dry run]" if cc.get("dry_run", True) else "")
+        if cc.get("dry_run", True) or count < 1 or not combo_tk:
+            self.state.data["combo_last"] = time.time()
+            return
+        tgt = Target(combo_tk, "yes")
+        name = "Weekly combo"
+        title = " + ".join(l["title"] for l in legs)
+        if take:
+            filled, cost = self._execute(tgt, "buy", count, ask)
+            if filled:
+                fee = kalshi_fee(filled, cost / filled, self.fee_rate)
+                self.state.add_position(combo_tk, "yes", filled)
+                self.state.add_spent(cost + fee)
+                self.state.open_lot(name, combo_tk, "yes", filled, cost / filled, fee, title)
+                self._journal(name, {"title": title, "outcome": "combo", "price": fair}, tgt, "buy", filled, cost / filled)
+        else:
+            starts = [x for x in (l.get("start") for l in legs) if x]
+            expires = int(min(min(starts) - 300 if starts else time.time() + 86400, time.time() + 86400))
+            if expires > time.time() + 300:
+                oid = f"paper-{uuid.uuid4()}"
+                if self.mode == "live":
+                    try:
+                        oid = self.kalshi.create_order(combo_tk, "yes", "buy", count, price, None,
+                                                       post_only=True, expiration_ts=expires).get("order_id")
+                    except Exception as e:
+                        log.error("combo limit order failed: %s", e)
+                        oid = None
+                if oid:
+                    self.state.data.setdefault("resting", []).append(
+                        {"id": oid, "ticker": combo_tk, "side": "yes", "price": price, "count": count,
+                         "remaining": count, "filled": 0, "fee_rate": 0.0175, "whale": name, "title": title,
+                         "outcome": "combo", "score": None, "expires": expires, "placed": int(time.time()),
+                         "pm_price": fair})
+        self.state.data["combo_last"] = time.time()
 
     def check_settlements(self) -> None:
         """Close out lots on Kalshi markets that have settled, so wins/losses are counted."""
