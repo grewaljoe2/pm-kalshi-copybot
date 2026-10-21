@@ -237,18 +237,63 @@ class Kalshi:
         self.s = session
         self.pkey = None
         pem: bytes | None = None
+        self.key_source = None
         if key_pem:  # key pasted into an env var (literal "\n" allowed)
             pem = key_pem.replace("\\n", "\n").encode()
+            self.key_source = "KALSHI_PRIVATE_KEY variable"
         elif key_path and os.path.exists(os.path.expanduser(key_path)):
             with open(os.path.expanduser(key_path), "rb") as f:
                 pem = f.read()
+            self.key_source = key_path
+        elif key_id:
+            pem, self.key_source = self._find_key_file()
         if key_id and pem:
+            pem = self._normalize_pem(pem)
             from cryptography.hazmat.primitives import serialization
             try:
                 self.pkey = serialization.load_pem_private_key(pem.strip() + b"\n", password=None)
             except Exception as e:
-                log.error("Kalshi private key could not be read: %s", e)
+                log.error("Kalshi private key could not be read (%s): %s", self.key_source, e)
                 self.pkey = None
+
+    @staticmethod
+    def _normalize_pem(pem: bytes) -> bytes:
+        """Repair keys whose line breaks were lost when pasted (common from phones)."""
+        text = pem.decode("utf-8", "ignore").replace("\\n", "\n").replace("\r", "")
+        m = re.search(r"-----BEGIN ([A-Z ]*PRIVATE KEY)-----(.*?)-----END \1-----", text, flags=re.S)
+        if not m:
+            return pem
+        body = re.sub(r"\s+", "", m.group(2))
+        lines = [body[i:i + 64] for i in range(0, len(body), 64)]
+        return ("-----BEGIN %s-----\n%s\n-----END %s-----\n" % (m.group(1), "\n".join(lines), m.group(1))).encode()
+
+    @staticmethod
+    def _find_key_file() -> tuple[bytes | None, str | None]:
+        """Look in Render's secret-file locations for any file that contains a private key."""
+        seen = []
+        for folder in ("/etc/secrets", os.getcwd()):
+            try:
+                names = sorted(os.listdir(folder))
+            except OSError:
+                continue
+            if folder == "/etc/secrets":
+                seen = names
+            for n in names:
+                p = os.path.join(folder, n)
+                try:
+                    if os.path.isfile(p) and os.path.getsize(p) < 20000:
+                        data = open(p, "rb").read()
+                        if b"PRIVATE KEY" in data:
+                            log.info("Kalshi key found in secret file '%s'", n)
+                            return data, p
+                except OSError:
+                    continue
+        for name, val in os.environ.items():  # pasted into an env var under another name?
+            if "PRIVATE KEY" in (val or ""):
+                log.info("Kalshi key found in environment variable '%s'", name)
+                return val.encode(), f"env {name}"
+        log.warning("No private key found. Files in /etc/secrets: %s", seen or "(none)")
+        return None, None
 
     def _headers(self, method: str, path: str) -> dict:
         if not self.pkey:
