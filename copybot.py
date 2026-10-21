@@ -656,6 +656,8 @@ class CopyBot:
         self.bank = cfg.get("bankroll", {}) or {}
         self.board_queue: list = []
         self.combo_picks: list = []
+        self.prop_picks: list = []      # rated player props (props.py), refreshed by the dashboard thread
+        self.prop_picks_new = False
         self.kalshi_link: dict = {"linked": False, "detail": "no API key set"}
 
     # ---- pause switch (persisted, toggled from the dashboard) ------------ #
@@ -713,8 +715,8 @@ class CopyBot:
                 self.process_board_queue()
             except Exception as e:
                 log.warning("board picks failed: %s", e)
-            if self.combo_picks:
-                picks, self.combo_picks = self.combo_picks, []
+            if self.combo_picks or self.prop_picks_new:
+                picks, self.combo_picks, self.prop_picks_new = self.combo_picks, [], False
                 try:
                     self.weekly_combo(picks)
                 except Exception as e:
@@ -1256,25 +1258,41 @@ class CopyBot:
         last = float(self.state.data.get("combo_last", 0) or 0)
         if time.time() - last < cc.get("every_days", 7) * 86400:
             return
-        legs, events = [], set()
-        for p in sorted(picks, key=lambda x: (-x["score"], -x["ev"])):
-            if (p.get("status") != "pre" or p["score"] < cc.get("min_score", 70) or p["ev"] <= 0
-                    or p["side"] != "yes" or not 0.25 <= p["ask"] <= 0.80):
+        legs, games = [], set()
+        pool = list(picks) + list(getattr(self, "prop_picks", []) or [])
+        min_hit = float(cc.get("min_hit_chance", 0.30))
+        fair_so_far = 1.0
+        # most likely legs first (score already rewards hit chance and price edge)
+        for p in sorted(pool, key=lambda x: (-x["score"], -x.get("p", x.get("whale_px", 0)))):
+            min_sc = cc.get("min_prop_score", 70) if p.get("kind") == "prop" else cc.get("min_score", 70)
+            if (p.get("status") != "pre" or p["score"] < min_sc or p["ev"] <= 0
+                    or p["side"] != "yes" or not 0.25 <= p["ask"] <= 0.93):
+                continue
+            if p.get("start") and p["start"] < time.time() + 900:
                 continue
             try:
                 m = self.kdata.market(p["ticker"])
             except Exception:
                 continue
             ev = m.get("event_ticker")
-            if not ev or ev in events:
-                continue
-            events.add(ev)
+            game = ev.split("-", 1)[1] if ev and "-" in ev else ev
+            if not ev or game in games:
+                continue  # one leg per game: legs from the same game move together
+            fair = float(p.get("p") or p["whale_px"])
+            if len(legs) >= cc.get("min_legs", 2) and fair_so_far * fair < min_hit:
+                continue  # adding this leg would make the combo too unlikely
+            games.add(game)
+            fair_so_far *= fair
+            label = p["outcome"] if p.get("kind") == "prop" else f'{p["title"]} — {p["outcome"]}'
             legs.append({"event_ticker": ev, "market_ticker": p["ticker"], "side": "yes",
-                         "fair": p["whale_px"], "title": f'{p["title"]} — {p["outcome"]}',
-                         "start": self._kalshi_start(m)})
+                         "fair": fair, "title": label, "start": p.get("start") or self._kalshi_start(m)})
             if len(legs) >= cc.get("max_legs", 3):
                 break
-        if len(legs) < cc.get("min_legs", 2):
+        if len(legs) < cc.get("min_legs", 2) or fair_so_far < min_hit:
+            if len(legs) >= 1:
+                log.info("COMBO not enough strong legs today (%d legs, hit chance %.0f%%)",
+                         len(legs), 100 * fair_so_far)
+            self.state.data["combo_last"] = time.time() - max(0, cc.get("every_days", 7) - 0.25) * 86400
             return
         # find a collection that allows all these events
         if time.time() - self._coll_cache[0] > 6 * 3600:
@@ -1291,17 +1309,27 @@ class CopyBot:
             if want <= evs and c.get("size_min", 2) <= len(legs) <= c.get("size_max", 10):
                 coll = c
                 break
-        if not coll:
-            log.info("COMBO no Kalshi collection allows these legs: %s", [l["market_ticker"] for l in legs])
-            self.state.data["combo_last"] = time.time() - (cc.get("every_days", 7) - 1) * 86400  # retry tomorrow
-            return
-        try:
-            res = self.kalshi.create_combo(coll["collection_ticker"],
-                                           [{k: l[k] for k in ("event_ticker", "market_ticker", "side")} for l in legs])
-            combo_tk = res.get("market_ticker")
-            cm = self.kdata.market(combo_tk) if combo_tk else {}
-        except Exception as e:
-            log.warning("combo: create failed: %s", e)
+        sel = [{k: l[k] for k in ("event_ticker", "market_ticker", "side")} for l in legs]
+        # The listing doesn't always say which events a collection takes: try the sports
+        # multi-game collections directly and let Kalshi accept or reject the legs.
+        cands = [coll] if coll else [c for c in self._coll_cache[1]
+                                     if "SPORTS" in (c.get("collection_ticker") or "").upper()
+                                     or "CROSSCATEGORY" in (c.get("collection_ticker") or "").upper()]
+        combo_tk, cm, errs = None, {}, []
+        for c in cands:
+            try:
+                res = self.kalshi.create_combo(c["collection_ticker"], sel)
+                combo_tk = res.get("market_ticker")
+                if combo_tk:
+                    cm = self.kdata.market(combo_tk)
+                    log.info("COMBO built in collection %s -> %s", c["collection_ticker"], combo_tk)
+                    break
+            except Exception as e:
+                errs.append(f'{c.get("collection_ticker")}: {str(e)[:160]}')
+        if not combo_tk:
+            log.info("COMBO no Kalshi collection accepted these legs %s: %s",
+                     [l["market_ticker"] for l in legs], errs[:3])
+            self.state.data["combo_last"] = time.time() - max(0, cc.get("every_days", 7) - 0.25) * 86400
             return
         fair = 1.0
         for l in legs:
@@ -1319,7 +1347,7 @@ class CopyBot:
             self.state.data["combo_last"] = time.time()
             return
         tgt = Target(combo_tk, "yes")
-        name = "Weekly combo"
+        name = "Combo"
         title = " + ".join(l["title"] for l in legs)
         if take:
             filled, cost = self._execute(tgt, "buy", count, ask)

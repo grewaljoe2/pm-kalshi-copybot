@@ -70,15 +70,17 @@ limit_orders:
   cancel_before_start_minutes: 5
   check_seconds: 30
 
-# Weekly whale combo: 2-3 of the week's best pre-game picks in one Kalshi combo, small stake.
+# Daily combo: 2-3 of the best whale picks and player props (different games) in one Kalshi combo, small stake.
 combos:
   enabled: true
   dry_run: true             # log what it would bet; set false after checking the logs
-  every_days: 7
+  every_days: 1             # one combo a day (retries every 6h if no strong legs)
   min_legs: 2
   max_legs: 3
-  min_score: 70
-  stake_pct: 0.02           # 2% of balance per week
+  min_score: 70             # whale legs
+  min_prop_score: 70        # player-prop legs (see props.py)
+  min_hit_chance: 0.30      # skip combos less likely than 30% to hit
+  stake_pct: 0.02           # 2% of balance per combo
 
 # Bankroll mode (sizing: score). Paper mode tracks a virtual bankroll starting here.
 bankroll:

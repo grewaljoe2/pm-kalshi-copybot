@@ -66,8 +66,34 @@ def start_background() -> None:
         log.info("Background threads started in pid %d", os.getpid())
 
 
-import props_probe  # noqa: E402
-_register("props-probe", props_probe.run)
+
+# ---- player props (rated from ESPN game logs, refreshed every 30 min) ------- #
+PROPS: dict = {"picks": [], "updated": None, "error": None}
+
+
+def _props_loop():
+    from props import PropModel
+    time.sleep(60)
+    model = None
+    while True:
+        try:
+            if BOT is not None:
+                if model is None:
+                    model = PropModel(lambda path, **p: BOT.kdata._req("GET", path, params=p),
+                                      BOT._kalshi_start, BOT.fee_rate)
+                picks = model.scan()
+                PROPS.update(picks=picks, updated=time.time(), error=None)
+                BOT.prop_picks = picks
+                BOT.prop_picks_new = True
+                log.info("PROPS top %s", json.dumps([{k: p[k] for k in (
+                    "outcome", "ask", "p", "p_hist", "last10", "avg", "score")} for p in picks[:10]]))
+        except Exception as e:
+            PROPS["error"] = str(e)[:200]
+            log.warning("props scan failed: %s", e)
+        time.sleep(1800)
+
+
+_register("props", _props_loop)
 
 # ---- bot thread ------------------------------------------------------------ #
 BOT: copybot.CopyBot | None = None
@@ -182,7 +208,7 @@ def index():
     st = BOT.status() if BOT else None
     return render_template_string(
         PAGE, st=st, err=BOT_ERROR, logs=list(LOG_LINES)[-80:][::-1],
-        trades=BOT.recent_journal(40) if BOT else [], ago=_ago, slate=SLATE, best=BEST,
+        trades=BOT.recent_journal(40) if BOT else [], ago=_ago, slate=SLATE, best=BEST, props=PROPS,
         now=datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
     )
 
@@ -242,6 +268,15 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
 <td><b>{{ b.score }}</b></td><td class="{{ 'ok' if b.ev > 0 else 'bad' }}">{{ '%+.1f'|format(100*b.ev) }}%</td><td>{{ '$%.2f'|format(b.stake) if b.stake else '—' }}</td></tr>{% endfor %}
 </table></div><div class="k" style="margin-top:6px">Whale bets from the last 24h on games that haven't started. EV compares Kalshi with Polymarket's price now. Refreshes every 10 min.</div>
 {% else %}<div class="k">Building the list (a few minutes after a restart)…</div>{% endif %}</div>
+<div class="card"><h2>Top player props (combo legs)</h2>
+{% if props.picks %}<div class="scroll"><table><tr><th>Prop</th><th>Last 10</th><th>Avg</th><th>Hit chance</th><th>Kalshi ¢</th><th>Score</th></tr>
+{% for p in props.picks[:12] %}<tr><td>{{ p.outcome }}<br><span class="k">{{ p.league }} · {{ p.ticker }}</span></td>
+<td>{{ p.last10 }}<br><span class="k">{{ p.recent|join(', ') }}</span></td><td>{{ p.avg }}</td>
+<td><b>{{ '%.0f'|format(100*p.p) }}%</b><br><span class="k">history {{ '%.0f'|format(100*p.p_hist) }}%</span></td>
+<td>{{ '%.0f'|format(100*p.ask) }}</td><td class="{{ 'ok' if p.edge > 0 else '' }}"><b>{{ p.score }}</b></td></tr>{% endfor %}
+</table></div><div class="k" style="margin-top:6px">Hit chance = how often the player cleared the line in his last {{ 'games' }} (recent games count more), pulled 35% toward Kalshi's price. Score 70+ with a positive edge can go into the combo, one leg per game. Refreshes every 30 min.</div>
+{% elif props.error %}<div class="k">Props scan error: {{ props.error }}</div>
+{% else %}<div class="k">Rating tonight's props (a few minutes after a restart)…</div>{% endif %}</div>
 <div class="card"><h2>Today's slate</h2>
 {% if slate %}<div class="grid">
 <div><div class="k">Kalshi games today</div><div class="v">{{ slate.games }}</div></div>
