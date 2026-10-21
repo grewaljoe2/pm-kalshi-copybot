@@ -39,6 +39,33 @@ for h in (logging.StreamHandler(), RingHandler()):
     root.addHandler(h)
 log = logging.getLogger("app")
 
+# ---- background threads --------------------------------------------------- #
+# Started lazily in the process that serves requests. Gunicorn may import this
+# module in its master process and then fork a worker; threads don't survive a
+# fork, so starting them at import time would run the bot where the dashboard
+# can't see it (or twice). One process, one bot.
+_THREADS: list[tuple[str, object]] = []
+_STARTED_PID: int | None = None
+_START_LOCK = threading.Lock()
+
+
+def _register(name: str, fn) -> None:
+    _THREADS.append((name, fn))
+
+
+def start_background() -> None:
+    global _STARTED_PID
+    if _STARTED_PID == os.getpid():
+        return
+    with _START_LOCK:
+        if _STARTED_PID == os.getpid():
+            return
+        _STARTED_PID = os.getpid()
+        for name, fn in _THREADS:
+            threading.Thread(target=fn, name=name, daemon=True).start()
+        log.info("Background threads started in pid %d", os.getpid())
+
+
 # ---- bot thread ------------------------------------------------------------ #
 BOT: copybot.CopyBot | None = None
 BOT_ERROR: str | None = None
@@ -62,7 +89,7 @@ def _bot_loop():
             STOP.wait(30)
 
 
-threading.Thread(target=_bot_loop, name="copybot", daemon=True).start()
+_register("copybot", _bot_loop)
 
 
 def _keep_awake():
@@ -80,7 +107,7 @@ def _keep_awake():
 
 
 if os.environ.get("KEEP_AWAKE") == "1":
-    threading.Thread(target=_keep_awake, name="keep-awake", daemon=True).start()
+    _register("keep-awake", _keep_awake)
 
 # ---- web ------------------------------------------------------------------- #
 app = Flask(__name__)
@@ -97,6 +124,7 @@ PUBLIC = os.environ.get("PUBLIC_DASHBOARD") == "1"
 
 @app.before_request
 def require_auth():
+    start_background()
     if request.path == "/healthz":
         return None
     # Public mode: no login while paper trading. Once live, the pause button needs the password again.
@@ -341,7 +369,7 @@ def _match_test(addr: str) -> None:
         log.warning("match test failed: %s", e)
 
 
-threading.Thread(target=_report_loop, name="reports", daemon=True).start()
+_register("reports", _report_loop)
 
 
 @app.get("/api/report")
@@ -434,7 +462,7 @@ def _slate_loop():
         STOP.wait(1800)
 
 
-threading.Thread(target=_slate_loop, name="slate", daemon=True).start()
+_register("slate", _slate_loop)
 
 
 
@@ -513,8 +541,9 @@ def _best_loop():
         STOP.wait(600)
 
 
-threading.Thread(target=_best_loop, name="best", daemon=True).start()
+_register("best", _best_loop)
 
 
 if __name__ == "__main__":
+    start_background()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
