@@ -1524,9 +1524,11 @@ class CopyBot:
                              self.state.data.get("resting", []) + self.state.data.get("lots", [])
                              if str(x.get("whale", "")).startswith("Combo"))
         legs = [l for l in legs if l["title"] not in in_play]
-        used = self.state.data.setdefault("combo_legs_used", {})  # leg ticker -> ts (never re-bet a leg)
-        for g in [g for g, ts in used.items() if time.time() - ts > 8 * 86400]:
-            used.pop(g, None)
+        used = {}  # legs in open/waiting combos are excluded above (by title)
+        if not self.state.data.get("combo_reset_v9"):
+            self.state.data["combo_reset_v9"] = True
+            self.state.data["combo_last_by"] = {}
+            self.state.data.pop("combo_legs_used", None)
         last_by = self.state.data.setdefault("combo_last_by", {})
         leagues = cc.get("leagues") or {}
         slates = list(self.combo_slate.get("slates", [])) if isinstance(self.combo_slate, dict) else []
