@@ -58,6 +58,12 @@ bankroll:
   max_open_pct: 0.70        # keep at least 30% of balance free
   daily_stop_pct: 0.15      # stop new bets for the day after a 15% drop
   min_stake_usd: 2.0
+  board:                    # also auto-bet the strongest "Best bets now" picks
+    enabled: true
+    min_score: 80
+    min_whales: 2           # at least 2 proven traders on the same side
+    min_ev: 0.0
+    max_age_hours: 12       # only fresh whale bets
 
 risk:
   sizing: score             # "score" (bankroll % by bet score), "fixed" or "proportional"

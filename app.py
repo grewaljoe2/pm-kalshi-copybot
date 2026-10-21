@@ -476,6 +476,7 @@ def compute_best() -> list[dict]:
                        same=len(whales) - 1, opposite=len(opp), rate=BOT.fee_rate)
         pct = stake_pct(sc["score"], BOT.bank.get("tiers", [[80, 0.05], [65, 0.035], [50, 0.025]]))
         out.append({"title": sample["title"], "outcome": outc, "whales": len(whales),
+                    "latest_ts": max(x["ts"] for x in bs),
                     "names": sorted({x["name"] for x in bs})[:4], "whale_usd": round(usd),
                     "whale_px": round(px, 3), "ticker": tk, "side": side, "ask": round(ask, 3),
                     "score": sc["score"], "ev": sc["ev"],
@@ -491,6 +492,8 @@ def _best_loop():
         try:
             bets = compute_best()
             BEST.update(bets=bets, updated=time.time())
+            if BOT is not None:
+                BOT.board_queue = list(bets)  # bot thread decides which to auto-bet
             log.info("BEST %s", json.dumps(bets[:8], default=str))
         except Exception as e:
             log.warning("best bets failed: %s", e)

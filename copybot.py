@@ -396,6 +396,7 @@ class CopyBot:
         self.whale_stats: dict = self.state.data.get("whale_stats", {})  # wallet -> screener stats
         self.screen_buys: list = []  # recent buys of other top whales (from the screener)
         self.bank = cfg.get("bankroll", {}) or {}
+        self.board_queue: list = []
 
     # ---- pause switch (persisted, toggled from the dashboard) ------------ #
     @property
@@ -425,6 +426,10 @@ class CopyBot:
                 except Exception as e:  # keep running on transient errors
                     self.last_error = f"{w.get('name', addr[:8])}: {e}"
                     log.warning("poll %s failed: %s", w.get("name", addr[:8]), e)
+            try:
+                self.process_board_queue()
+            except Exception as e:
+                log.warning("board picks failed: %s", e)
             self.last_poll = time.time()
             if time.time() - self._last_settle_check > self.cfg.get("settle_check_seconds", 600):
                 self._last_settle_check = time.time()
@@ -572,21 +577,9 @@ class CopyBot:
         # sizing
         held_usd = self.state.position(tgt.ticker, tgt.side) * ask
         if r["sizing"] == "score":
-            b = self.bank
-            pct = stake_pct(sc["score"], b.get("tiers", [[80, 0.05], [65, 0.035], [50, 0.025]]))
-            if pct <= 0:
-                return self._skip(t, name, f"score {sc['score']} below minimum")
-            if sc["ev"] < b.get("min_ev", 0.0):
-                return self._skip(t, name, f"expected value {100 * sc['ev']:+.1f}% after fees")
-            eq = self.equity()
-            if eq <= self.day_start_equity() * (1 - b.get("daily_stop_pct", 0.15)):
-                return self._skip(t, name, "daily loss stop reached")
-            budget = eq * pct
-            budget = min(budget, eq * b.get("max_game_pct", 0.08) - held_usd)
-            budget = min(budget, eq * b.get("max_open_pct", 0.7) - self.open_cost())
-            budget = min(budget, self.cash())
-            if budget < b.get("min_stake_usd", 2.0):
-                return self._skip(t, name, "bankroll limits leave no room")
+            budget, why = self._bankroll_budget(sc["score"], sc["ev"], held_usd)
+            if why:
+                return self._skip(t, name, why)
         else:
             if r["sizing"] == "fixed":
                 budget = r["fixed_usd"]
@@ -611,6 +604,78 @@ class CopyBot:
             self.state.open_lot(name, tgt.ticker, tgt.side, filled, px, fee, t.get("title") or "")
             self.state.data["lots"][-1]["score"] = sc["score"]
             self._journal(name, t, tgt, "buy", filled, px, score=sc["score"])
+
+    def _bankroll_budget(self, score: float, ev: float, held_usd: float) -> tuple[float, str | None]:
+        """$ to stake from the bankroll for a bet with this score, or (0, reason to skip)."""
+        from scoring import stake_pct
+        b = self.bank
+        pct = stake_pct(score, b.get("tiers", [[80, 0.05], [65, 0.035], [50, 0.025]]))
+        if pct <= 0:
+            return 0.0, f"score {score} below minimum"
+        if ev < b.get("min_ev", 0.0):
+            return 0.0, f"expected value {100 * ev:+.1f}% after fees"
+        eq = self.equity()
+        if eq <= self.day_start_equity() * (1 - b.get("daily_stop_pct", 0.15)):
+            return 0.0, "daily loss stop reached"
+        budget = eq * pct
+        budget = min(budget, eq * b.get("max_game_pct", 0.08) - held_usd)
+        budget = min(budget, eq * b.get("max_open_pct", 0.7) - self.open_cost())
+        budget = min(budget, self.cash())
+        if budget < b.get("min_stake_usd", 2.0):
+            return 0.0, "bankroll limits leave no room"
+        return budget, None
+
+    def process_board_queue(self) -> None:
+        """Auto-bet the strongest 'Best bets' picks (several proven traders agree, high score)."""
+        picks, self.board_queue = self.board_queue, []
+        bc = self.bank.get("board", {}) or {}
+        if not picks or not bc.get("enabled", False) or self.paused or self.risk.get("sizing") != "score":
+            return
+        done = self.state.data.setdefault("board_done", {})
+        for k in [k for k, ts in done.items() if ts < time.time() - 48 * 3600]:
+            del done[k]
+        for p in picks:
+            if (p["score"] < bc.get("min_score", 80) or p["whales"] < bc.get("min_whales", 2)
+                    or p["ev"] <= bc.get("min_ev", 0.0)
+                    or time.time() - p.get("latest_ts", 0) > bc.get("max_age_hours", 12) * 3600):
+                continue
+            key = f'{p["ticker"]}|{p["side"]}'
+            if key in done or self.state.position(p["ticker"], p["side"]) > 0:
+                continue
+            t = {"title": p["title"], "outcome": p["outcome"], "price": p["whale_px"]}
+            name = "Board picks"
+            try:
+                m = self.kdata.market(p["ticker"])
+            except Exception as e:
+                log.warning("board pick lookup failed: %s", e)
+                continue
+            if m.get("status") not in (None, "open", "active"):
+                continue
+            ask = _px(m, f'{p["side"]}_ask')
+            if not ask or ask <= 0 or ask >= 1 or ask > p["ask"] + 0.01 or ask > self.risk["max_entry_price"]:
+                continue  # price moved or unusable
+            if 100 * self.fee_rate * (1 - ask) > self.risk.get("max_fee_pct", 6):
+                continue
+            log.info("[Board] %s %s -> %s %s  score %d EV %+.1f%%  (%d traders: %s)", p["title"], p["outcome"],
+                     p["ticker"], p["side"].upper(), p["score"], 100 * p["ev"], p["whales"], ", ".join(p["names"]))
+            budget, why = self._bankroll_budget(p["score"], p["ev"], 0.0)
+            if why:
+                self._skip(t, name, why)
+                continue
+            count = math.floor(budget / ask)
+            if count < 1:
+                continue
+            tgt = Target(p["ticker"], p["side"])
+            filled, cost = self._execute(tgt, "buy", count, ask)
+            done[key] = time.time()
+            if filled:
+                px = cost / filled
+                fee = kalshi_fee(filled, px, self.fee_rate)
+                self.state.add_position(tgt.ticker, tgt.side, filled)
+                self.state.add_spent(cost + fee)
+                self.state.open_lot(name, tgt.ticker, tgt.side, filled, px, fee, p["title"])
+                self.state.data["lots"][-1]["score"] = p["score"]
+                self._journal(name, t, tgt, "buy", filled, px, score=p["score"])
 
     def _copy_sell(self, addr, name, t, tgt: Target, whale_px, sold) -> None:
         held = self.state.position(tgt.ticker, tgt.side)
