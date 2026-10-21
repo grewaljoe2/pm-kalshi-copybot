@@ -204,6 +204,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
 
 # ---- whale reports (refreshed every 6h, shown at /report) ------------------ #
 REPORTS: dict[str, dict] = {}
+SCREEN: list[dict] = []
 
 
 def _report_loop():
@@ -229,51 +230,58 @@ def _report_loop():
                     log.info("WHALE_POS %s", json.dumps(p, default=str))
                 whale_report.add_matches(rep)
                 log.info("WHALE_SCANNED %s kalshi markets", rep.get("kalshi_markets_scanned"))
-                _log_samples(addr)
+                _match_test(addr)
                 for c in rep.get("kalshi_candidates", []):
                     log.info("WHALE_MATCH %s", json.dumps(c, default=str))
             except Exception as e:
                 log.warning("whale report for %s failed: %s", addr[:8], e)
+        try:
+            import screener
+            res = screener.screen()
+            SCREEN[:] = res
+            keys = ("name", "wallet", "score", "pnl_week", "pnl_month", "pnl_all", "per_day",
+                    "median_usd", "copyable_pct", "extreme_price_pct", "buys_pct", "top_leagues",
+                    "kinds", "last_trade_h", "days_covered")
+            log.info("SCREEN_DONE %d traders", len(res))
+            for r in res[:25]:
+                log.info("SCREEN %s", json.dumps({k: r.get(k) for k in keys}, default=str))
+        except Exception as e:
+            log.warning("screener failed: %s", e)
         STOP.wait(6 * 3600)
 
 
-def _log_samples(addr: str) -> None:
-    """Temporary diagnostics: how Kalshi lists games and how whale trades look."""
+def _match_test(addr: str) -> None:
+    """Run the sports matcher on the whale's recent real trades and log the results."""
     import json
     from collections import Counter
     import whale_report
+    if BOT is None:
+        return
     try:
-        km = whale_report.kalshi_markets()
-        series = Counter(m["ticker"].split("-")[0] for m in km)
-        games = {s: n for s, n in series.items() if any(k in s for k in ("GAME", "MATCH", "MAP", "FIGHT"))}
-        log.info("KSERIES_GAMES %s", json.dumps(sorted(games.items(), key=lambda x: -x[1])[:80]))
-        log.info("KSERIES_ALL %s", json.dumps(series.most_common(60)))
-        keys = ("ticker", "event_ticker", "title", "subtitle", "yes_sub_title", "no_sub_title",
-                "close_time", "expected_expiration_time", "rules_primary", "yes_ask", "yes_ask_dollars",
-                "volume", "status")
+        trades = whale_report._get(f"{whale_report.POLY}/trades", user=addr, limit=100)
+        reasons, found, examples = Counter(), 0, []
         seen = set()
-        for m in km:
-            s = m["ticker"].split("-")[0]
-            if s in games and s not in seen and len(seen) < 12:
-                seen.add(s)
-                log.info("KSAMPLE %s", json.dumps({k: (str(m.get(k))[:200]) for k in keys}))
-        try:
-            ser = whale_report._get(f"{whale_report.KALSHI}/series", category="Sports")
-            lst = ser.get("series", []) or []
-            log.info("KSPORTS_SERIES_COUNT %d", len(lst))
-            names = [s.get("ticker") for s in lst]
-            for i in range(0, len(names), 150):
-                log.info("KSPORTS_SERIES %s", json.dumps(names[i:i + 150]))
-            esport = [(s.get("ticker"), s.get("title")) for s in lst
-                      if any(k in (s.get("title") or "").lower() for k in ("counter", "cs2", "csgo", "league of legends", "dota", "valorant", "esport", "tennis", "atp", "wta", "champions league"))]
-            log.info("KSPORTS_MATCHING %s", json.dumps(esport[:120]))
-        except Exception as e:
-            log.warning("series fetch failed: %s", e)
-        trades = whale_report._get(f"{whale_report.POLY}/trades", user=addr, limit=6)
-        for t in trades[:6]:
-            log.info("PMTRADE %s", json.dumps({k: v for k, v in t.items() if k not in ("icon", "profileImage", "profileImageOptimized", "bio", "pseudonym", "name")}))
+        for t in trades:
+            key = (t.get("slug"), t.get("outcome"))
+            if key in seen:
+                continue
+            seen.add(key)
+            r, why = BOT.sports.lookup(t)
+            if r:
+                found += 1
+                if len(examples) < 12:
+                    examples.append({"pm": t.get("title"), "out": t.get("outcome"), "k": r["ticker"],
+                                     "side": r["side"], "how": r.get("how")})
+            else:
+                reasons[why if not why.startswith("no Kalshi market for") else "no Kalshi market for team"] += 1
+                if why.startswith(("no Kalshi", "found team")) and len(examples) < 24:
+                    examples.append({"pm": t.get("title"), "slug": t.get("slug"), "out": t.get("outcome"), "miss": why})
+        log.info("MATCHTEST %s", json.dumps({"unique_bets": len(seen), "matched": found,
+                                             "reasons": reasons.most_common()}))
+        for e in examples:
+            log.info("MATCHEX %s", json.dumps(e))
     except Exception as e:
-        log.warning("samples failed: %s", e)
+        log.warning("match test failed: %s", e)
 
 
 threading.Thread(target=_report_loop, name="reports", daemon=True).start()
@@ -286,7 +294,7 @@ def api_report():
 
 @app.get("/report")
 def report_page():
-    return render_template_string(REPORT_PAGE, reports=list(REPORTS.values()))
+    return render_template_string(REPORT_PAGE, reports=list(REPORTS.values()), screen=SCREEN[:20])
 
 
 REPORT_PAGE = """<!doctype html><html><head><meta charset="utf-8">
@@ -308,7 +316,14 @@ Trades: ~{{ t.per_day }}/day · median ${{ '{:,.0f}'.format(t.median_usd or 0) }
 <div class="card"><h3 style="margin-top:0">Kalshi match candidates</h3>
 {% for m in r.kalshi_candidates or [] %}<p><b>{{ m.pm_title }}</b> [{{ m.outcome }}] ${{ '{:,.0f}'.format(m.value) }}<br>
 {% for x in m.matches %}<span class="k">{{ x.score }}</span> {{ x.ticker }} — {{ x.text }}<br>{% endfor %}</p>{% endfor %}</div>
-{% endfor %}</main></body></html>"""
+{% endfor %}
+<div class="card"><h3 style="margin-top:0">Top sports whales to copy (ranked)</h3>
+{% if not screen %}<div class="k">Screening runs a few minutes after each restart.</div>{% endif %}
+<div style="overflow-x:auto"><table><tr><th>#</th><th>Trader</th><th>Score</th><th>Month P&amp;L</th><th>All-time</th><th>/day</th><th>Median $</th><th>Copyable</th></tr>
+{% for s in screen %}<tr><td>{{ loop.index }}</td><td>{{ s.name }}<br><span class="k">{{ s.wallet }}</span></td><td>{{ s.score }}</td>
+<td>${{ '{:,.0f}'.format(s.pnl_month or 0) }}</td><td>${{ '{:,.0f}'.format(s.pnl_all or 0) }}</td><td>{{ s.per_day }}</td>
+<td>${{ '{:,.0f}'.format(s.median_usd or 0) }}</td><td>{{ s.copyable_pct }}%</td></tr>{% endfor %}</table></div></div>
+</main></body></html>"""
 
 
 if __name__ == "__main__":

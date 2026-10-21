@@ -268,6 +268,12 @@ class CopyBot:
         self.state = State(str(data_dir / cfg.get("state_file", "state.json")))
         self.journal = data_dir / cfg.get("journal_file", "journal.csv")
         self.whales = {w["address"].lower(): w for w in cfg["whales"]}
+        self.auto_sports = bool(cfg.get("auto_match_sports", True))
+        from sports_match import SportsMatcher
+        # Market data: real Kalshi prices, except when live-trading on the demo site
+        data_env = "demo" if (self.mode == "live" and self.kalshi_env == "demo") else "prod"
+        self.kdata = Kalshi(data_env, None, None, sess)
+        self.sports = SportsMatcher(lambda path, **p: self.kdata._req("GET", path, params=p))
         self.last_poll: float | None = None
         self.last_error: str | None = None
         self.balance: float | None = None
@@ -349,6 +355,13 @@ class CopyBot:
         if age > self.risk["max_trade_age_seconds"]:
             return self._skip(t, name, f"stale ({age:.0f}s old)")
         tgt = self.maps.lookup(t)
+        if not tgt and self.auto_sports:
+            found, reason = self.sports.lookup(t)
+            if found:
+                tgt = Target(found["ticker"], found["side"])
+                log.info("  auto-matched -> %s %s", tgt.ticker, tgt.side.upper())
+            else:
+                return self._skip(t, name, reason)
         if not tgt:
             return self._skip(t, name, "no Kalshi mapping")
 
@@ -362,7 +375,7 @@ class CopyBot:
 
     def _copy_buy(self, name, whale, t, tgt: Target, whale_px, whale_usd) -> None:
         r = self.risk
-        m = self.kalshi.market(tgt.ticker)
+        m = self.kdata.market(tgt.ticker)
         if m.get("status") not in (None, "open", "active"):
             return self._skip(t, name, f"Kalshi market {m.get('status')}")
         ask = _px(m, f"{tgt.side}_ask")
@@ -403,7 +416,7 @@ class CopyBot:
             remaining = 0.0
         frac = 1.0 if remaining <= 0 else min(1.0, sold / (sold + remaining))
         count = max(1, math.floor(held * frac))
-        m = self.kalshi.market(tgt.ticker)
+        m = self.kdata.market(tgt.ticker)
         bid = _px(m, f"{tgt.side}_bid")
         if not bid:
             return self._skip(t, name, "no bid on Kalshi to sell into")

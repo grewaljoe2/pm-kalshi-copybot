@@ -7,6 +7,7 @@ mode: paper
 
 poll_seconds: 15
 mappings_file: mappings.yaml
+auto_match_sports: true   # find the same game on Kalshi automatically
 state_file: state.json
 journal_file: journal.csv
 
