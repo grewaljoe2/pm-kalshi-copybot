@@ -280,9 +280,9 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
 {% else %}<div class="k">Rating tonight's props (a few minutes after a restart)…</div>{% endif %}</div>
 <div class="card"><h2>Today's combos{% if combos.dry_run %} (test mode, not placed){% endif %}</h2>
 {% if combos.combos %}<div class="scroll"><table><tr><th>Legs</th><th>Hit chance</th><th>Price</th><th>Stake</th><th>Pays</th></tr>
-{% for c in combos.combos %}<tr><td>{% for l in c.legs %}{{ l }}{% if not loop.last %}<br>{% endif %}{% endfor %}<br><span class="k">{{ c.size }}-leg · {{ c.action }}{% if c.note %} · {{ c.note }}{% endif %}</span></td>
+{% for c in combos.combos %}<tr><td>{% for l in c.legs %}{{ l }}{% if not loop.last %}<br>{% endif %}{% endfor %}<br><span class="k">{{ c.league }} · {{ c.size }}-leg · {{ c.action }}{% if c.placed %} · placed{% endif %}{% if c.note %} · {{ c.note }}{% endif %}</span></td>
 <td><b>{{ '%.0f'|format(100*c.hit) }}%</b></td><td>{{ '%.0f¢'|format(100*c.price) if c.price else '—' }}</td><td>${{ '%.2f'|format(c.stake) }}</td><td>${{ c.payout }}</td></tr>{% endfor %}
-</table></div><div class="k" style="margin-top:6px">Uses {{ combos.legs_used }} of {{ combos.legs_available }} strong legs, one per game, each leg in only one combo. Hit chance = the legs' chances multiplied. Built once a day.</div>
+</table></div><div class="k" style="margin-top:6px">{% for s in combos.slates %}{{ s.league }}: {{ s.legs_used }} of {{ s.legs_available }} strong legs. {% endfor %}One leg per game, each leg in only one combo. Hit chance = the legs' chances multiplied. NBA built daily for tonight, NFL for the upcoming games. LIMIT = waiting at a fair price; TAKE = bought at Kalshi's price.</div>
 {% else %}<div class="k">Built once a day from the props above and the whale picks.</div>{% endif %}</div>
 <div class="card"><h2>Today's slate</h2>
 {% if slate %}<div class="grid">

@@ -70,19 +70,32 @@ limit_orders:
   cancel_before_start_minutes: 5
   check_seconds: 30
 
-# Daily combo: 2-3 of the best whale picks and player props (different games) in one Kalshi combo, small stake.
+# Combos (parlays): strong whale picks + player props, one leg per game, each leg used once.
+# Small combos get the strongest legs; 5-6 leg combos only use elite legs (84%+ each).
 combos:
   enabled: true
-  dry_run: true             # log what it would bet; set false after checking the logs
-  every_days: 1             # one combo a day (retries every 6h if no strong legs)
-  min_legs: 2
-  max_legs: 4
-  sizes: [2, 2, 3, 3, 4]    # split the day's strong legs into these combos (each leg used once)
+  dry_run: false            # LIVE: real orders
   min_score: 70             # whale legs
   min_prop_score: 70        # player-prop legs (see props.py)
-  min_hit_chance: 0.30      # skip combos less likely than 30% to hit
-  daily_budget_pct: 0.06    # 6% of balance across all combos, more to the likelier ones
+  min_hit_chance: 0.30      # never build a combo less likely than 30% to hit
+  elite_leg_chance: 0.84    # legs allowed in 5-6 leg combos
   min_stake_usd: 1.0
+  leagues:
+    NBA:                    # daily: tonight's games
+      every_hours: 20
+      max_hours_ahead: 30
+      sizes: [2, 3, 4, 6]
+      budget_pct: 0.04      # 4% of balance per day across NBA combos
+    NFL:                    # upcoming games (this week), rebuilt daily with games not used yet
+      every_hours: 20
+      max_hours_ahead: 120
+      sizes: [2, 3, 4, 6]
+      budget_pct: 0.04
+    OTHER:                  # whale picks from other leagues (college football etc.)
+      every_hours: 20
+      max_hours_ahead: 48
+      sizes: [2, 3]
+      budget_pct: 0.02
 
 # Bankroll mode (sizing: score). Paper mode tracks a virtual bankroll starting here.
 bankroll:

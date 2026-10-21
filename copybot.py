@@ -1248,7 +1248,7 @@ class CopyBot:
 
     # ---- daily combo slate ------------------------------------------------- #
     _coll_cache: tuple = (0.0, [])
-    combo_slate: dict = {"combos": [], "built": None, "legs_used": 0, "legs_available": 0}
+    combo_slate: dict = {"combos": [], "slates": []}
 
     def _combo_pool(self, picks: list[dict], cc: dict) -> list[dict]:
         """Best qualifying leg per game, most likely first."""
@@ -1278,23 +1278,25 @@ class CopyBot:
                 best[game] = leg  # legs from the same game move together: one per game
         return sorted(best.values(), key=lambda l: (-l["fair"], -l["score"]))
 
-    def _plan_slate(self, legs: list[dict], cc: dict) -> list[list[dict]]:
+    def _plan_slate(self, legs: list[dict], cc: dict, sizes: list[int]) -> list[list[dict]]:
         """Split legs into separate combos (each leg used once). Strongest legs go into the small
-        combos (highest hit chance), the rest fill the bigger ones. A combo below the hit-chance
-        floor is shrunk until it clears it."""
-        sizes = cc.get("sizes") or [2, 2, 3, 3, 4]
+        combos (highest hit chance); 5-6 leg combos only use elite legs. A combo below the
+        hit-chance floor is shrunk until it clears it."""
         min_hit = float(cc.get("min_hit_chance", 0.30))
+        elite = float(cc.get("elite_leg_chance", 0.84))
         left, out = list(legs), []
         for n in sizes:
-            if len(left) < 2:
-                break
-            take = left[:n]
+            pool = [l for l in left if n < 5 or l["fair"] >= elite]
+            if len(pool) < 2:
+                continue
+            take = pool[:n]
             while len(take) > 2 and math.prod(l["fair"] for l in take) < min_hit:
                 take = take[:-1]
             if len(take) < 2 or math.prod(l["fair"] for l in take) < min_hit:
                 continue
             out.append(take)
-            left = left[len(take):]
+            ids = {id(l) for l in take}
+            left = [l for l in left if id(l) not in ids]
         return out
 
     def _build_combo(self, legs: list[dict]) -> tuple[str | None, dict, list]:
@@ -1328,49 +1330,79 @@ class CopyBot:
                 errs.append(f'{c.get("collection_ticker")}: {str(e)[:160]}')
         return None, {}, errs
 
+    @staticmethod
+    def _combo_league(ticker: str) -> str:
+        t = ticker.upper()
+        return "NBA" if t.startswith("KXNBA") else ("NFL" if t.startswith("KXNFL") else "OTHER")
+
     def weekly_combo(self, picks: list[dict]) -> None:
-        """Daily combo slate: all strong legs (whale picks + player props), one per game, split
-        into several 2-4 leg combos. Daily budget is shared, more to the likelier combos."""
-        from scoring import fee_per_contract
+        """Combo slates per league: NBA daily (tonight's games), NFL for the upcoming games,
+        other whale picks on their own. Strong legs (whale picks + player props), one per game,
+        are split into several combos; 5-6 legs only from elite legs."""
         cc = self.cfg.get("combos", {}) or {}
         if not cc.get("enabled", False) or self.paused or not self.kalshi.pkey:
             return
-        if not self.state.data.get("combo_reset_v4"):  # new slate builder: run now
-            self.state.data["combo_reset_v4"] = True
-            self.state.data["combo_last"] = 0
-        if time.time() - float(self.state.data.get("combo_last", 0) or 0) < cc.get("every_days", 1) * 86400:
-            return
+        if not self.state.data.get("combo_reset_v5"):
+            self.state.data["combo_reset_v5"] = True
+            self.state.data["combo_last_by"] = {}
         legs = self._combo_pool(picks, cc)
-        plan = self._plan_slate(legs, cc)
-        if not plan:
-            log.info("COMBO slate: no combos yet (%d strong legs) - will retry when new picks arrive", len(legs))
-            return
-        budget = self.equity() * float(cc.get("daily_budget_pct", 0.06))
+        used = self.state.data.setdefault("combo_games_used", {})  # game -> ts (don't re-bet a game)
+        for g in [g for g, ts in used.items() if time.time() - ts > 8 * 86400]:
+            used.pop(g, None)
+        last_by = self.state.data.setdefault("combo_last_by", {})
+        leagues = cc.get("leagues") or {}
+        slates = list(self.combo_slate.get("slates", [])) if isinstance(self.combo_slate, dict) else []
+        for lg in ("NBA", "NFL", "OTHER"):
+            lc = leagues.get(lg, {}) or {}
+            if not lc.get("enabled", True):
+                continue
+            if time.time() - float(last_by.get(lg, 0) or 0) < float(lc.get("every_hours", 24)) * 3600:
+                continue
+            lg_legs = [l for l in legs if self._combo_league(l["market_ticker"]) == lg and l["game"] not in used
+                       and (not l.get("start") or l["start"] < time.time() + float(lc.get("max_hours_ahead", 30)) * 3600)]
+            plan = self._plan_slate(lg_legs, cc, lc.get("sizes") or [2, 3, 4])
+            if not plan:
+                if lg_legs:
+                    log.info("COMBO %s: %d strong legs, not enough for a combo yet", lg, len(lg_legs))
+                continue
+            rows = self._run_slate(lg, plan, cc, float(lc.get("budget_pct", 0.04)))
+            for combo, row in zip(plan, rows):
+                if row.get("placed"):
+                    for l in combo:
+                        used[l["game"]] = time.time()
+            last_by[lg] = time.time()
+            slates = [s for s in slates if s.get("league") != lg] + [
+                {"league": lg, "built": time.time(), "combos": rows, "legs_available": len(lg_legs),
+                 "legs_used": sum(len(c) for c in plan)}]
+        self.combo_slate = {"slates": slates, "dry_run": cc.get("dry_run", True),
+                            "combos": [r | {"league": s["league"]} for s in slates for r in s["combos"]]}
+
+    def _run_slate(self, lg: str, plan: list[list[dict]], cc: dict, budget_pct: float) -> list[dict]:
+        from scoring import fee_per_contract
+        budget = self.equity() * budget_pct
         hits = [math.prod(l["fair"] for l in c) for c in plan]
         dry = cc.get("dry_run", True)
-        slate = []
+        rows = []
         for combo, hit in zip(plan, hits):
             stake = max(float(cc.get("min_stake_usd", 1.0)), budget * hit / sum(hits))
             combo_tk, cm, errs = self._build_combo(combo)
-            ask = _px(cm, "yes_ask") if combo_tk else None
+            ask = _px(cm, "yes_ask") if cm else None
             price = math.floor(hit * 100) / 100
             take = ask is not None and 0 < ask <= hit - fee_per_contract(ask, self.fee_rate)
             px = ask if take else price
             count = math.floor(stake / px) if px and px > 0 else 0
             row = {"legs": [l["title"] for l in combo], "size": len(combo), "hit": round(hit, 3),
-                   "ticker": combo_tk, "ask": ask, "price": px, "count": count, "stake": round(count * (px or 0), 2),
-                   "payout": count, "action": ("TAKE" if take else "LIMIT") if combo_tk else "not offered",
-                   "note": "; ".join(errs[-1:]) if (not combo_tk or not cm) else ""}
-            slate.append(row)
-            log.info("COMBO %d-leg hit %.0f%% %s -> %s %d @ %s (stake $%.2f, pays $%d)%s %s",
-                     len(combo), 100 * hit, row["legs"], row["action"], count, px, row["stake"], count,
-                     "  [dry run]" if dry else "", row["note"])
-            if dry or count < 1 or not combo_tk:
-                continue
-            self._place_combo(combo_tk, combo, hit, ask, price, count, take)
-        self.combo_slate = {"combos": slate, "built": time.time(), "dry_run": dry,
-                            "legs_used": sum(len(c) for c in plan), "legs_available": len(legs)}
-        self.state.data["combo_last"] = time.time()
+                   "ticker": combo_tk, "ask": ask, "price": px, "count": count,
+                   "stake": round(count * (px or 0), 2), "payout": count,
+                   "action": ("TAKE" if take else "LIMIT") if combo_tk else "not offered",
+                   "note": "; ".join(errs[-1:]) if (not combo_tk or not cm) else "", "placed": False}
+            log.info("COMBO %s %d-leg hit %.0f%% %s -> %s %d @ %s (stake $%.2f, pays $%d, Kalshi ask %s)%s %s",
+                     lg, len(combo), 100 * hit, row["legs"], row["action"], count, px, row["stake"], count,
+                     ask, "  [dry run]" if dry else "", row["note"])
+            if not dry and count >= 1 and combo_tk:
+                row["placed"] = self._place_combo(combo_tk, combo, hit, ask, price, count, take)
+            rows.append(row)
+        return rows
 
     def _place_combo(self, combo_tk, legs, fair, ask, price, count, take) -> None:
         tgt = Target(combo_tk, "yes")
@@ -1384,11 +1416,11 @@ class CopyBot:
                 self.state.add_spent(cost + fee)
                 self.state.open_lot(name, combo_tk, "yes", filled, cost / filled, fee, title)
                 self._journal(name, {"title": title, "outcome": "combo", "price": fair}, tgt, "buy", filled, cost / filled)
-            return
+            return bool(filled)
         starts = [x for x in (l.get("start") for l in legs) if x]
         expires = int(min(min(starts) - 300 if starts else time.time() + 86400, time.time() + 86400))
         if expires <= time.time() + 300:
-            return
+            return False
         oid = f"paper-{uuid.uuid4()}"
         if self.mode == "live":
             try:
@@ -1403,6 +1435,7 @@ class CopyBot:
                  "remaining": count, "filled": 0, "fee_rate": 0.0175, "whale": name, "title": title,
                  "outcome": "combo", "score": None, "expires": expires, "placed": int(time.time()),
                  "pm_price": fair})
+        return bool(oid)
 
     def check_settlements(self) -> None:
         """Close out lots on Kalshi markets that have settled, so wins/losses are counted."""
