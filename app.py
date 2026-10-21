@@ -283,6 +283,12 @@ def _report_loop():
                 BOT.state.data["whale_stats"] = BOT.whale_stats
                 BOT.screen_buys = [b for r in good[:30] for b in r.get("_buys", [])]
                 log.info("Screener fed %d whale records and %d recent buys", len(stats), len(BOT.screen_buys))
+                try:
+                    bets = compute_best()
+                    BEST.update(bets=bets, updated=time.time())
+                    BOT.board_queue = list(bets)
+                except Exception as e:
+                    log.warning("best bets refresh failed: %s", e)
             keys = ("name", "wallet", "score", "pnl_week", "pnl_month", "pnl_all", "per_day",
                     "median_usd", "copyable_pct", "extreme_price_pct", "buys_pct", "top_leagues",
                     "kinds", "last_trade_h", "days_covered")
