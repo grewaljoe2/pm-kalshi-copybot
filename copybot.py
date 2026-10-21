@@ -1496,8 +1496,14 @@ class CopyBot:
         return "NBA" if t.startswith("KXNBA") else ("NFL" if t.startswith("KXNFL") else "OTHER")
 
     def _combo_spent_today(self) -> float:
-        d = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        return float((self.state.data.get("combo_spent_by_day") or {}).get(d, 0.0))
+        """Money in combos today = combos bought today + combo limit orders still waiting.
+        (Waiting orders that expire or get cancelled free their money again.)"""
+        day0 = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        bought = sum(float(l.get("cost", 0)) + float(l.get("fee", 0)) for l in self.state.data.get("lots", [])
+                     if str(l.get("whale", "")).startswith("Combo") and float(l.get("opened", 0)) >= day0)
+        waiting = sum(float(r.get("price", 0)) * float(r.get("remaining", 0)) for r in self.state.data.get("resting", [])
+                      if str(r.get("whale", "")).startswith("Combo"))
+        return round(bought + waiting, 2)
 
     def _add_combo_spent(self, usd: float) -> None:
         d = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -1534,8 +1540,8 @@ class CopyBot:
                              if str(x.get("whale", "")).startswith("Combo"))
         legs = [l for l in legs if l["title"] not in in_play]
         used = {}  # legs in open/waiting combos are excluded above (by title)
-        if not self.state.data.get("combo_reset_v9"):
-            self.state.data["combo_reset_v9"] = True
+        if not self.state.data.get("combo_reset_v10"):
+            self.state.data["combo_reset_v10"] = True
             self.state.data["combo_last_by"] = {}
             self.state.data.pop("combo_legs_used", None)
         last_by = self.state.data.setdefault("combo_last_by", {})
@@ -1654,7 +1660,6 @@ class CopyBot:
                     name = f"Combo {len(combo)}-leg"
                     self.state.add_position(combo_tk, "yes", n)
                     self.state.add_spent(n * px + fee)
-                    self._add_combo_spent(n * px + fee)
                     self.state.open_lot(name, combo_tk, "yes", n, px, fee, title)
                     self._journal(name, {"title": title, "outcome": "combo", "price": hit},
                                   Target(combo_tk, "yes"), "buy", n, px)
@@ -1667,8 +1672,6 @@ class CopyBot:
                     px = math.floor(max_px * 100) / 100
                     count = math.floor(stake / px) if px > 0 else 0
                     ok = count >= 1 and self._place_combo(combo_tk, combo, hit, None, px, count, False)
-                    if ok:
-                        self._add_combo_spent(count * px)
                     if q.get("error"):
                         log.warning("COMBO quote request error: %s", q["error"])
                     row.update(action=f"LIMIT (quote {q['status']}{' ' + str(q.get('best')) if q.get('best') else ''})",
