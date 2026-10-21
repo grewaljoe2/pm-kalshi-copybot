@@ -189,6 +189,13 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
   <form method="post" action="{{ '/resume' if st.paused else '/pause' }}" style="margin-top:12px">
     <button>{{ 'Resume copying' if st.paused else 'Pause copying' }}</button></form>
 </div>
+<div class="card"><h2>Whale scoreboard (your copied results)</h2>
+{% if st.scoreboard %}<div class="scroll"><table><tr><th>Whale</th><th>Settled</th><th>Win %</th><th>P&amp;L</th><th>ROI</th><th>Open</th></tr>
+{% for b in st.scoreboard %}<tr><td>{{ b.whale }}</td><td>{{ b.closed }}</td><td>{{ b.win_rate if b.win_rate is not none else '—' }}{% if b.win_rate is not none %}%{% endif %}</td>
+<td class="{{ 'ok' if b.pnl > 0 else ('bad' if b.pnl < 0 else '') }}">{{ '-' if b.pnl < 0 }}${{ '%.2f'|format(b.pnl|abs) }}</td>
+<td>{{ b.roi if b.roi is not none else '—' }}{% if b.roi is not none %}%{% endif %}</td><td>{{ b.open_lots }} (${{ '%.0f'|format(b.open_cost) }})</td></tr>{% endfor %}
+</table></div><div class="k" style="margin-top:6px">P&amp;L is after estimated Kalshi fees. Bets count once Kalshi settles the game or the whale exits.</div>
+{% else %}<div class="k">No copied bets yet.</div>{% endif %}</div>
 <div class="card"><h2>Open positions</h2>
 {% if st.positions %}<table>{% for k,v in st.positions.items() %}<tr><td>{{ k.split('|')[0] }}</td><td>{{ k.split('|')[1]|upper }}</td><td>{{ v }} contracts</td></tr>{% endfor %}</table>
 {% else %}<div class="k">None</div>{% endif %}</div>

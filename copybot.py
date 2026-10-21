@@ -47,17 +47,50 @@ def load_yaml(path: str | Path) -> dict:
 
 
 class State:
-    """Persists seen trades, our positions and daily spend between restarts."""
+    """Persists seen trades, positions, the trade ledger and daily spend between restarts.
+
+    Stored in Postgres when DATABASE_URL is set (survives restarts on Render's free
+    plan), otherwise in a local JSON file.
+    """
+
+    DEFAULT = {"seen": {}, "positions": {}, "spent_by_day": {}, "initialized": [],
+               "lots": [], "closed": [], "events": []}
 
     def __init__(self, path: str):
         self.path = Path(path)
-        self.data = {"seen": {}, "positions": {}, "spent_by_day": {}, "initialized": []}
-        if self.path.exists():
-            self.data.update(json.loads(self.path.read_text()))
+        self.db_url = os.environ.get("DATABASE_URL")
+        self.data = json.loads(json.dumps(self.DEFAULT))
+        loaded = None
+        if self.db_url:
+            try:
+                import psycopg
+                with psycopg.connect(self.db_url, connect_timeout=10) as c:
+                    c.execute("create table if not exists copybot_state "
+                              "(id text primary key, data jsonb not null, updated timestamptz default now())")
+                    row = c.execute("select data from copybot_state where id='main'").fetchone()
+                    loaded = row[0] if row else None
+                log.info("State: using database")
+            except Exception as e:
+                log.error("State database unavailable, using local file: %s", e)
+                self.db_url = None
+        if loaded is None and self.path.exists():
+            loaded = json.loads(self.path.read_text())
+        if loaded:
+            self.data.update(loaded)
 
     def save(self) -> None:
+        blob = json.dumps(self.data)
+        if self.db_url:
+            try:
+                import psycopg
+                with psycopg.connect(self.db_url, connect_timeout=10) as c:
+                    c.execute("insert into copybot_state (id, data, updated) values ('main', %s, now()) "
+                              "on conflict (id) do update set data = excluded.data, updated = now()", (blob,))
+                return
+            except Exception as e:
+                log.warning("State save to database failed (%s); writing local file", e)
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.data, indent=2))
+        tmp.write_text(blob)
         tmp.replace(self.path)
 
     # trades already processed, keyed per wallet
@@ -76,6 +109,8 @@ class State:
     def add_position(self, ticker: str, side: str, delta: int) -> None:
         k = f"{ticker}|{side}"
         self.data["positions"][k] = max(0, self.position(ticker, side) + delta)
+        if not self.data["positions"][k]:
+            del self.data["positions"][k]
 
     def total_exposure_contracts(self) -> int:
         return sum(self.data["positions"].values())
@@ -86,6 +121,79 @@ class State:
     def add_spent(self, usd: float) -> None:
         d = _today()
         self.data["spent_by_day"][d] = round(self.spent_today() + usd, 4)
+        for k in sorted(self.data["spent_by_day"])[:-14]:
+            del self.data["spent_by_day"][k]
+
+    # ---- ledger: which whale's copy made or lost what --------------------- #
+    def open_lot(self, whale: str, ticker: str, side: str, count: int, price: float,
+                 fee: float, title: str) -> None:
+        self.data["lots"].append({"whale": whale, "ticker": ticker, "side": side, "count": count,
+                                  "cost": round(count * price, 4), "fee": fee, "title": title,
+                                  "opened": int(time.time())})
+
+    def _close(self, lot: dict, count: int, proceeds: float, fee: float, how: str,
+               result: str | None = None) -> None:
+        frac = count / lot["count"]
+        cost, ofee = lot["cost"] * frac, lot["fee"] * frac
+        pnl = proceeds - cost - ofee - fee
+        self.data["closed"].append({
+            "whale": lot["whale"], "ticker": lot["ticker"], "side": lot["side"], "title": lot["title"],
+            "count": count, "cost": round(cost, 4), "proceeds": round(proceeds, 4),
+            "fees": round(ofee + fee, 4), "pnl": round(pnl, 4), "how": how, "result": result,
+            "opened": lot["opened"], "closed": int(time.time())})
+        del self.data["closed"][:-3000]
+        lot["count"] -= count
+        lot["cost"] = round(lot["cost"] - cost, 4)
+        lot["fee"] = round(lot["fee"] - ofee, 4)
+
+    def sell_lots(self, ticker: str, side: str, count: int, price: float, fee: float) -> None:
+        """FIFO-close lots when we copy a whale's exit."""
+        left, total = count, count
+        for lot in [l for l in self.data["lots"] if l["ticker"] == ticker and l["side"] == side]:
+            if left <= 0:
+                break
+            n = min(left, lot["count"])
+            self._close(lot, n, n * price, fee * n / total, "sold")
+            left -= n
+        self.data["lots"] = [l for l in self.data["lots"] if l["count"] > 0]
+
+    def settle(self, ticker: str, result: str) -> int:
+        """Close every lot on a market Kalshi has settled. Returns lots closed."""
+        n = 0
+        for lot in [l for l in self.data["lots"] if l["ticker"] == ticker]:
+            if result in ("yes", "no"):
+                payout = lot["count"] * (1.0 if lot["side"] == result else 0.0)
+            else:  # voided / cancelled: money back
+                payout = lot["cost"]
+            self._close(lot, lot["count"], payout, 0.0, "settled", result)
+            self.data["positions"].pop(f"{ticker}|{lot['side']}", None)
+            n += 1
+        self.data["lots"] = [l for l in self.data["lots"] if l["count"] > 0]
+        return n
+
+    def scoreboard(self) -> list[dict]:
+        board: dict[str, dict] = {}
+        for c in self.data["closed"]:
+            b = board.setdefault(c["whale"], {"whale": c["whale"], "closed": 0, "wins": 0, "pnl": 0.0,
+                                              "staked": 0.0, "fees": 0.0, "open_lots": 0, "open_cost": 0.0})
+            b["closed"] += 1
+            b["wins"] += 1 if c["pnl"] > 0 else 0
+            b["pnl"] += c["pnl"]
+            b["staked"] += c["cost"]
+            b["fees"] += c["fees"]
+        for l in self.data["lots"]:
+            b = board.setdefault(l["whale"], {"whale": l["whale"], "closed": 0, "wins": 0, "pnl": 0.0,
+                                              "staked": 0.0, "fees": 0.0, "open_lots": 0, "open_cost": 0.0})
+            b["open_lots"] += 1
+            b["open_cost"] += l["cost"]
+        out = []
+        for b in board.values():
+            b["win_rate"] = round(100 * b["wins"] / b["closed"]) if b["closed"] else None
+            b["roi"] = round(100 * b["pnl"] / b["staked"], 1) if b["staked"] else None
+            for k in ("pnl", "staked", "fees", "open_cost"):
+                b[k] = round(b[k], 2)
+            out.append(b)
+        return sorted(out, key=lambda x: -x["pnl"])
 
 
 def _today() -> str:
@@ -186,6 +294,11 @@ class Kalshi:
         return self._req("POST", "/portfolio/orders", json=body)["order"]
 
 
+def kalshi_fee(count: int, price: float, rate: float = 0.07) -> float:
+    """Estimated Kalshi taker fee: rate x contracts x P x (1-P), rounded up to the cent."""
+    return math.ceil(rate * count * price * (1 - price) * 100 - 1e-9) / 100
+
+
 def _px(market: dict, field: str) -> float | None:
     """Read a price from a Kalshi market as dollars (handles cents + _dollars fields)."""
     v = market.get(f"{field}_dollars")
@@ -274,9 +387,11 @@ class CopyBot:
         data_env = "demo" if (self.mode == "live" and self.kalshi_env == "demo") else "prod"
         self.kdata = Kalshi(data_env, None, None, sess)
         self.sports = SportsMatcher(lambda path, **p: self.kdata._req("GET", path, params=p))
+        self.fee_rate = float(self.risk.get("fee_rate", 0.07))
         self.last_poll: float | None = None
         self.last_error: str | None = None
         self.balance: float | None = None
+        self._last_settle_check = 0.0
 
     # ---- pause switch (persisted, toggled from the dashboard) ------------ #
     @property
@@ -307,6 +422,12 @@ class CopyBot:
                     self.last_error = f"{w.get('name', addr[:8])}: {e}"
                     log.warning("poll %s failed: %s", w.get("name", addr[:8]), e)
             self.last_poll = time.time()
+            if time.time() - self._last_settle_check > self.cfg.get("settle_check_seconds", 600):
+                self._last_settle_check = time.time()
+                try:
+                    self.check_settlements()
+                except Exception as e:
+                    log.warning("settlement check failed: %s", e)
             self.state.save()
             if once:
                 return
@@ -399,12 +520,18 @@ class CopyBot:
         count = math.floor(budget / ask) if budget > 0 else 0
         if count < 1:
             return self._skip(t, name, "risk limits leave no room")
+        fee_pct = 100 * self.fee_rate * (1 - ask)  # fee as % of stake
+        if fee_pct > r.get("max_fee_pct", 6):
+            return self._skip(t, name, f"Kalshi fee ~{fee_pct:.1f}% of stake is too high")
 
         filled, cost = self._execute(tgt, "buy", count, ask)
         if filled:
+            px = cost / filled
+            fee = kalshi_fee(filled, px, self.fee_rate)
             self.state.add_position(tgt.ticker, tgt.side, filled)
-            self.state.add_spent(cost)
-            self._journal(name, t, tgt, "buy", filled, cost / filled)
+            self.state.add_spent(cost + fee)
+            self.state.open_lot(name, tgt.ticker, tgt.side, filled, px, fee, t.get("title") or "")
+            self._journal(name, t, tgt, "buy", filled, px)
 
     def _copy_sell(self, addr, name, t, tgt: Target, whale_px, sold) -> None:
         held = self.state.position(tgt.ticker, tgt.side)
@@ -425,8 +552,24 @@ class CopyBot:
             return self._skip(t, name, f"bid {bid:.3f} below floor {floor:.3f}")
         filled, proceeds = self._execute(tgt, "sell", count, bid)
         if filled:
+            px = proceeds / filled
             self.state.add_position(tgt.ticker, tgt.side, -filled)
-            self._journal(name, t, tgt, "sell", filled, proceeds / filled)
+            self.state.sell_lots(tgt.ticker, tgt.side, filled, px, kalshi_fee(filled, px, self.fee_rate))
+            self._journal(name, t, tgt, "sell", filled, px)
+
+    def check_settlements(self) -> None:
+        """Close out lots on Kalshi markets that have settled, so wins/losses are counted."""
+        tickers = sorted({l["ticker"] for l in self.state.data["lots"]})
+        for tk in tickers:
+            try:
+                m = self.kdata.market(tk)
+            except Exception as e:
+                log.warning("settle lookup %s failed: %s", tk, e)
+                continue
+            result = (m.get("result") or "").lower()
+            if result and m.get("status") in ("settled", "finalized", "determined", "closed"):
+                n = self.state.settle(tk, result)
+                log.info("SETTLED %s result=%s (%d lots)", tk, result, n)
 
     def _execute(self, tgt: Target, action: str, count: int, px: float) -> tuple[int, float]:
         if self.mode != "live":
@@ -446,11 +589,7 @@ class CopyBot:
 
     # ---- dashboard helpers ----------------------------------------------- #
     def recent_journal(self, n: int = 50) -> list[dict]:
-        if not self.journal.exists():
-            return []
-        with self.journal.open(newline="") as f:
-            rows = list(csv.DictReader(f))
-        return rows[-n:][::-1]
+        return self.state.data.get("events", [])[-n:][::-1]
 
     def status(self) -> dict:
         return {
@@ -462,6 +601,8 @@ class CopyBot:
             "positions": {k: v for k, v in self.state.data["positions"].items() if v},
             "spent_today": self.state.spent_today(),
             "max_usd_per_day": self.risk["max_usd_per_day"],
+            "scoreboard": self.state.scoreboard(),
+            "open_lots": len(self.state.data["lots"]),
             "last_poll": self.last_poll,
             "last_error": self.last_error,
             "balance": self.balance,
@@ -472,6 +613,12 @@ class CopyBot:
         log.info("  skip: %s", reason)
 
     def _journal(self, name, t, tgt, action, count, px) -> None:
+        ev = self.state.data.setdefault("events", [])
+        ev.append({"time_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"), "mode": self.mode,
+                   "whale": name, "pm_title": t.get("title"), "pm_outcome": t.get("outcome"),
+                   "pm_price": t.get("price"), "kalshi_ticker": tgt.ticker, "side": tgt.side,
+                   "action": action, "contracts": count, "price": f"{px:.4f}"})
+        del ev[:-500]
         new = not self.journal.exists()
         with self.journal.open("a", newline="") as f:
             w = csv.writer(f)

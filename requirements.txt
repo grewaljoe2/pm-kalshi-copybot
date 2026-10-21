@@ -3,3 +3,4 @@ pyyaml>=6.0
 cryptography>=42.0
 flask>=3.0
 gunicorn>=22.0
+psycopg[binary]>=3.2

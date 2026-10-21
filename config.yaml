@@ -46,3 +46,5 @@ risk:
   max_trade_age_seconds: 300
   always_follow_exits: true # sell when whale sells, even below their price
   time_in_force: fill_or_kill
+  fee_rate: 0.07            # Kalshi taker fee estimate: rate x contracts x P x (1-P)
+  max_fee_pct: 6            # skip bets where the fee eats more than this % of the stake
