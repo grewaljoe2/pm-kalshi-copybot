@@ -78,6 +78,14 @@ def screen(max_wallets: int = 90) -> list[dict]:
                 else:
                     kinds["other"] += 1
             extreme = sum(1 for t in trades if not 0.1 <= float(t.get("price") or 0) <= 0.9)
+            cutoff = time.time() - 48 * 3600
+            d["_buys"] = [{"w": w, "name": d["name"], "cond": t.get("conditionId"), "out": t.get("outcome"),
+                           "usd": round(float(t.get("size") or 0) * float(t.get("price") or 0), 2),
+                           "px": float(t.get("price") or 0), "ts": int(t.get("timestamp") or 0),
+                           "slug": t.get("slug"), "eventSlug": t.get("eventSlug"), "title": t.get("title"),
+                           "outcomeIndex": t.get("outcomeIndex")}
+                          for t in trades if str(t.get("side")).upper() == "BUY"
+                          and int(t.get("timestamp") or 0) >= cutoff]
             d.update({
                 "trades_sampled": len(trades),
                 "per_day": round(len(trades) / span, 1) if span > 0.05 else len(trades),

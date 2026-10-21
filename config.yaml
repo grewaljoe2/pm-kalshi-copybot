@@ -46,8 +46,21 @@ whales:
     address: "0x27f738fe203827445690339104aae35b20bc44b0"
     min_trade_usd: 150         # typical bet ~$420
 
+# Bankroll mode (sizing: score). Paper mode tracks a virtual bankroll starting here.
+bankroll:
+  start_usd: 100
+  tiers:                    # [min score, % of balance per bet]
+    - [80, 0.05]
+    - [65, 0.035]
+    - [50, 0.025]
+  min_ev: 0.0               # skip bets with negative expected value after fees
+  max_game_pct: 0.08        # at most 8% of balance on one market
+  max_open_pct: 0.70        # keep at least 30% of balance free
+  daily_stop_pct: 0.15      # stop new bets for the day after a 15% drop
+  min_stake_usd: 2.0
+
 risk:
-  sizing: fixed             # "fixed" or "proportional"
+  sizing: score             # "score" (bankroll % by bet score), "fixed" or "proportional"
   fixed_usd: 25             # $ per copied trade when sizing = fixed
   copy_ratio: 0.01          # default ratio when sizing = proportional
   min_whale_trade_usd: 1000

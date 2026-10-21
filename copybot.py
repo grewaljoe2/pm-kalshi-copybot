@@ -19,6 +19,7 @@ import json
 import logging
 import math
 import os
+import re
 import sys
 import time
 import uuid
@@ -140,7 +141,7 @@ class State:
             "whale": lot["whale"], "ticker": lot["ticker"], "side": lot["side"], "title": lot["title"],
             "count": count, "cost": round(cost, 4), "proceeds": round(proceeds, 4),
             "fees": round(ofee + fee, 4), "pnl": round(pnl, 4), "how": how, "result": result,
-            "opened": lot["opened"], "closed": int(time.time())})
+            "opened": lot["opened"], "closed": int(time.time()), "score": lot.get("score")})
         del self.data["closed"][:-3000]
         lot["count"] -= count
         lot["cost"] = round(lot["cost"] - cost, 4)
@@ -392,6 +393,9 @@ class CopyBot:
         self.last_error: str | None = None
         self.balance: float | None = None
         self._last_settle_check = 0.0
+        self.whale_stats: dict = self.state.data.get("whale_stats", {})  # wallet -> screener stats
+        self.screen_buys: list = []  # recent buys of other top whales (from the screener)
+        self.bank = cfg.get("bankroll", {}) or {}
 
     # ---- pause switch (persisted, toggled from the dashboard) ------------ #
     @property
@@ -447,6 +451,7 @@ class CopyBot:
             if self.state.is_seen(addr, key):
                 continue
             self.state.mark_seen(addr, key)
+            self._remember_buy(addr, whale.get("name", addr[:8]), t)
             if first_run:
                 continue  # don't copy history on first start
             if self.paused:
@@ -458,6 +463,52 @@ class CopyBot:
             self.state.data["initialized"].append(addr)
             log.info("Baseline set for %s (%d past trades ignored)",
                      whale.get("name", addr[:8]), len(trades))
+
+    # ---- consensus + bankroll helpers -------------------------------------- #
+    def _remember_buy(self, addr: str, name: str, t: dict) -> None:
+        if str(t.get("side", "")).upper() != "BUY":
+            return
+        rb = self.state.data.setdefault("recent_buys", [])
+        rb.append({"w": addr, "name": name, "cond": t.get("conditionId"), "out": t.get("outcome"),
+                   "usd": round(float(t.get("size") or 0) * float(t.get("price") or 0), 2),
+                   "px": float(t.get("price") or 0), "ts": int(t.get("timestamp") or 0),
+                   "slug": t.get("slug"), "eventSlug": t.get("eventSlug"), "title": t.get("title"),
+                   "outcomeIndex": t.get("outcomeIndex")})
+        cutoff = time.time() - 48 * 3600
+        self.state.data["recent_buys"] = [b for b in rb if b["ts"] >= cutoff][-4000:]
+
+    def consensus(self, addr: str, t: dict) -> tuple[int, int]:
+        """(# other whales on the same side, # on the other side) in the last 48h."""
+        cond, out = t.get("conditionId"), t.get("outcome")
+        same, opp = set(), set()
+        for b in self.state.data.get("recent_buys", []) + self.screen_buys:
+            if b.get("cond") != cond or b.get("w") == addr:
+                continue
+            (same if b.get("out") == out else opp).add(b.get("w"))
+        return len(same), len(opp - same)
+
+    def open_cost(self) -> float:
+        return sum(l["cost"] + l.get("fee", 0) for l in self.state.data["lots"])
+
+    def equity(self) -> float:
+        """Paper: starting bankroll + settled P&L. Live: Kalshi cash + money in open bets."""
+        if self.mode == "live" and self.balance is not None:
+            return self.balance + self.open_cost()
+        start = float(self.bank.get("start_usd", 100))
+        return start + sum(c["pnl"] for c in self.state.data["closed"])
+
+    def cash(self) -> float:
+        if self.mode == "live" and self.balance is not None:
+            return self.balance
+        return self.equity() - self.open_cost()
+
+    def day_start_equity(self) -> float:
+        d = self.state.data.setdefault("day_equity", {})
+        if _today() not in d:
+            d[_today()] = round(self.equity(), 2)
+            for k in sorted(d)[:-14]:
+                del d[k]
+        return d[_today()]
 
     # ---- copy logic ------------------------------------------------------ #
     def handle_trade(self, addr: str, whale: dict, t: dict) -> None:
@@ -508,15 +559,42 @@ class CopyBot:
         if ask > r["max_entry_price"]:
             return self._skip(t, name, f"price {ask:.3f} above max_entry_price")
 
+        # score the bet
+        from scoring import score_bet, stake_pct
+        addr = whale.get("address", "").lower()
+        stats = self.whale_stats.get(addr)
+        same, opp = self.consensus(addr, t)
+        sc = score_bet(whale_px=whale_px, ask=ask, whale_usd=whale_usd, stats=stats,
+                       same=same, opposite=opp, rate=self.fee_rate)
+        log.info("  score %d (EV %+.1f%%) %s  whales same/opp %d/%d", sc["score"], 100 * sc["ev"],
+                 sc["parts"], same, opp)
+
         # sizing
-        if r["sizing"] == "fixed":
-            budget = r["fixed_usd"]
-        else:  # proportional
-            budget = whale_usd * whale.get("copy_ratio", r["copy_ratio"])
-        budget = min(budget, r["max_usd_per_trade"])
-        budget = min(budget, r["max_usd_per_day"] - self.state.spent_today())
         held_usd = self.state.position(tgt.ticker, tgt.side) * ask
-        budget = min(budget, r["max_usd_per_market"] - held_usd)
+        if r["sizing"] == "score":
+            b = self.bank
+            pct = stake_pct(sc["score"], b.get("tiers", [[80, 0.05], [65, 0.035], [50, 0.025]]))
+            if pct <= 0:
+                return self._skip(t, name, f"score {sc['score']} below minimum")
+            if sc["ev"] < b.get("min_ev", 0.0):
+                return self._skip(t, name, f"expected value {100 * sc['ev']:+.1f}% after fees")
+            eq = self.equity()
+            if eq <= self.day_start_equity() * (1 - b.get("daily_stop_pct", 0.15)):
+                return self._skip(t, name, "daily loss stop reached")
+            budget = eq * pct
+            budget = min(budget, eq * b.get("max_game_pct", 0.08) - held_usd)
+            budget = min(budget, eq * b.get("max_open_pct", 0.7) - self.open_cost())
+            budget = min(budget, self.cash())
+            if budget < b.get("min_stake_usd", 2.0):
+                return self._skip(t, name, "bankroll limits leave no room")
+        else:
+            if r["sizing"] == "fixed":
+                budget = r["fixed_usd"]
+            else:  # proportional
+                budget = whale_usd * whale.get("copy_ratio", r["copy_ratio"])
+            budget = min(budget, r["max_usd_per_trade"])
+            budget = min(budget, r["max_usd_per_day"] - self.state.spent_today())
+            budget = min(budget, r["max_usd_per_market"] - held_usd)
         count = math.floor(budget / ask) if budget > 0 else 0
         if count < 1:
             return self._skip(t, name, "risk limits leave no room")
@@ -531,7 +609,8 @@ class CopyBot:
             self.state.add_position(tgt.ticker, tgt.side, filled)
             self.state.add_spent(cost + fee)
             self.state.open_lot(name, tgt.ticker, tgt.side, filled, px, fee, t.get("title") or "")
-            self._journal(name, t, tgt, "buy", filled, px)
+            self.state.data["lots"][-1]["score"] = sc["score"]
+            self._journal(name, t, tgt, "buy", filled, px, score=sc["score"])
 
     def _copy_sell(self, addr, name, t, tgt: Target, whale_px, sold) -> None:
         held = self.state.position(tgt.ticker, tgt.side)
@@ -602,6 +681,10 @@ class CopyBot:
             "spent_today": self.state.spent_today(),
             "max_usd_per_day": self.risk["max_usd_per_day"],
             "scoreboard": self.state.scoreboard(),
+            "equity": round(self.equity(), 2),
+            "cash": round(self.cash(), 2),
+            "start_usd": float(self.bank.get("start_usd", 100)),
+            "sizing": self.risk.get("sizing"),
             "open_lots": len(self.state.data["lots"]),
             "last_poll": self.last_poll,
             "last_error": self.last_error,
@@ -613,17 +696,17 @@ class CopyBot:
         log.info("  skip: %s", reason)
         day = self.state.data.setdefault("skips", {})
         today = day.setdefault(_today(), {})
-        key = reason.split("(")[0].split("'")[0].strip()[:60]
+        key = re.sub(r"[+-]?\d+(\.\d+)?%?", "#", reason.split("(")[0].split("'")[0]).strip()[:60]
         today[key] = today.get(key, 0) + 1
         for k in sorted(day)[:-7]:
             del day[k]
 
-    def _journal(self, name, t, tgt, action, count, px) -> None:
+    def _journal(self, name, t, tgt, action, count, px, score=None) -> None:
         ev = self.state.data.setdefault("events", [])
         ev.append({"time_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"), "mode": self.mode,
                    "whale": name, "pm_title": t.get("title"), "pm_outcome": t.get("outcome"),
                    "pm_price": t.get("price"), "kalshi_ticker": tgt.ticker, "side": tgt.side,
-                   "action": action, "contracts": count, "price": f"{px:.4f}"})
+                   "action": action, "contracts": count, "price": f"{px:.4f}", "score": score})
         del ev[:-500]
         new = not self.journal.exists()
         with self.journal.open("a", newline="") as f:

@@ -151,7 +151,7 @@ def index():
     st = BOT.status() if BOT else None
     return render_template_string(
         PAGE, st=st, err=BOT_ERROR, logs=list(LOG_LINES)[-80:][::-1],
-        trades=BOT.recent_journal(40) if BOT else [], ago=_ago, slate=SLATE,
+        trades=BOT.recent_journal(40) if BOT else [], ago=_ago, slate=SLATE, best=BEST,
         now=datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
     )
 
@@ -195,6 +195,18 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
   <form method="post" action="{{ '/resume' if st.paused else '/pause' }}" style="margin-top:12px">
     <button>{{ 'Resume copying' if st.paused else 'Pause copying' }}</button></form>
 </div>
+{% if st %}<div class="card"><h2>${{ '%.0f'|format(st.start_usd) }} bankroll ({{ 'paper' if st.mode != 'live' else 'live' }})</h2>
+<div class="grid"><div><div class="k">Balance</div><div class="v {{ 'ok' if st.equity > st.start_usd else ('bad' if st.equity < st.start_usd else '') }}">${{ '%.2f'|format(st.equity) }}</div></div>
+<div><div class="k">Free cash</div><div class="v">${{ '%.2f'|format(st.cash) }}</div></div>
+<div><div class="k">Return</div><div class="v">{{ '%+.1f'|format(100 * (st.equity / st.start_usd - 1)) }}%</div></div>
+<div><div class="k">Open bets</div><div class="v">{{ st.open_lots }}</div></div></div></div>{% endif %}
+<div class="card"><h2>Best bets now</h2>
+{% if best.bets %}<div class="scroll"><table><tr><th>Bet</th><th>Whales</th><th>Whale ¢</th><th>Kalshi ¢</th><th>Score</th><th>EV</th><th>Stake</th></tr>
+{% for b in best.bets[:12] %}<tr><td>{{ b.title }}<br><span class="k">{{ b.outcome }} → {{ b.ticker }} {{ b.side|upper }}</span></td>
+<td>{{ b.whales }}<br><span class="k">${{ '{:,}'.format(b.whale_usd) }}</span></td><td>{{ '%.0f'|format(100*b.whale_px) }}</td><td>{{ '%.0f'|format(100*b.ask) }}</td>
+<td><b>{{ b.score }}</b></td><td class="{{ 'ok' if b.ev > 0 else 'bad' }}">{{ '%+.1f'|format(100*b.ev) }}%</td><td>{{ '$%.2f'|format(b.stake) if b.stake else '—' }}</td></tr>{% endfor %}
+</table></div><div class="k" style="margin-top:6px">Whale bets from the last 24h on games still open on Kalshi. Refreshes every 10 min.</div>
+{% else %}<div class="k">Building the list (a few minutes after a restart)…</div>{% endif %}</div>
 <div class="card"><h2>Today's slate</h2>
 {% if slate %}<div class="grid">
 <div><div class="k">Kalshi games today</div><div class="v">{{ slate.games }}</div></div>
@@ -261,6 +273,14 @@ def _report_loop():
             import screener
             res = screener.screen()
             SCREEN[:] = res
+            if BOT is not None:
+                good = [r for r in res if (r.get("pnl_month") or 0) > 0 and (r.get("pnl_all") or 0) > 0]
+                stats = {r["wallet"]: {k: r.get(k) for k in ("name", "pnl_month", "pnl_all", "median_usd",
+                                                             "per_day", "score")} for r in res}
+                BOT.whale_stats.update(stats)
+                BOT.state.data["whale_stats"] = BOT.whale_stats
+                BOT.screen_buys = [b for r in good[:30] for b in r.get("_buys", [])]
+                log.info("Screener fed %d whale records and %d recent buys", len(stats), len(BOT.screen_buys))
             keys = ("name", "wallet", "score", "pnl_week", "pnl_month", "pnl_all", "per_day",
                     "median_usd", "copyable_pct", "extreme_price_pct", "buys_pct", "top_leagues",
                     "kinds", "last_trade_h", "days_covered")
@@ -404,6 +424,80 @@ def _slate_loop():
 
 
 threading.Thread(target=_slate_loop, name="slate", daemon=True).start()
+
+
+
+# ---- best bets now: recent whale buys on open games, ranked by score -------- #
+BEST: dict = {"bets": [], "updated": None}
+
+
+def compute_best() -> list[dict]:
+    """Recent whale buys (last 24h) on games still open on Kalshi, ranked by bet score."""
+    from collections import defaultdict
+    from scoring import score_bet, stake_pct
+    if BOT is None:
+        return []
+    cutoff = time.time() - 24 * 3600
+    pool = [b for b in BOT.state.data.get("recent_buys", []) + BOT.screen_buys
+            if b.get("ts", 0) >= cutoff and b.get("cond")]
+    groups = defaultdict(list)
+    for b in pool:
+        groups[(b["cond"], b["out"])].append(b)
+    ranked = sorted(groups.items(), key=lambda kv: -sum(x["usd"] for x in kv[1]))[:60]
+    out = []
+    for (cond, outc), bs in ranked:
+        sample = max(bs, key=lambda x: x["usd"])
+        t = {"slug": sample["slug"], "eventSlug": sample["eventSlug"], "title": sample["title"],
+             "outcome": outc, "outcomeIndex": sample.get("outcomeIndex"), "conditionId": cond}
+        tgt = BOT.maps.lookup(t)
+        if tgt:
+            tk, side = tgt.ticker, tgt.side
+        else:
+            found, _ = BOT.sports.lookup(t)
+            if not found:
+                continue
+            tk, side = found["ticker"], found["side"]
+        try:
+            m = BOT.kdata.market(tk)
+        except Exception:
+            continue
+        if m.get("status") not in (None, "open", "active"):
+            continue
+        ask = copybot._px(m, f"{side}_ask")
+        if not ask or ask <= 0 or ask >= 1:
+            continue
+        whales = {x["w"] for x in bs}
+        opp = {x["w"] for x in pool if x["cond"] == cond and x["out"] != outc} - whales
+        usd = sum(x["usd"] for x in bs)
+        px = sum(x["px"] * x["usd"] for x in bs) / usd if usd else sample["px"]
+        best_stats = max((BOT.whale_stats.get(w) or {} for w in whales),
+                         key=lambda s: s.get("pnl_all") or 0, default=None)
+        sc = score_bet(whale_px=px, ask=ask, whale_usd=sample["usd"], stats=best_stats or None,
+                       same=len(whales) - 1, opposite=len(opp), rate=BOT.fee_rate)
+        pct = stake_pct(sc["score"], BOT.bank.get("tiers", [[80, 0.05], [65, 0.035], [50, 0.025]]))
+        out.append({"title": sample["title"], "outcome": outc, "whales": len(whales),
+                    "names": sorted({x["name"] for x in bs})[:4], "whale_usd": round(usd),
+                    "whale_px": round(px, 3), "ticker": tk, "side": side, "ask": round(ask, 3),
+                    "score": sc["score"], "ev": sc["ev"],
+                    "stake": round(BOT.equity() * pct, 2) if sc["ev"] >= 0 else 0})
+    out.sort(key=lambda x: (-x["score"], -x["ev"]))
+    return out[:20]
+
+
+def _best_loop():
+    import json
+    STOP.wait(60)
+    while not STOP.is_set():
+        try:
+            bets = compute_best()
+            BEST.update(bets=bets, updated=time.time())
+            log.info("BEST %s", json.dumps(bets[:8], default=str))
+        except Exception as e:
+            log.warning("best bets failed: %s", e)
+        STOP.wait(600)
+
+
+threading.Thread(target=_best_loop, name="best", daemon=True).start()
 
 
 if __name__ == "__main__":
