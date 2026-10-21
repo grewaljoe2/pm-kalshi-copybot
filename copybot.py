@@ -636,6 +636,26 @@ class CopyBot:
             return self.balance
         return self.equity() - self.open_cost()
 
+    def current_stage(self) -> dict:
+        """Growth plan: bet heavier while the account is small, taper as it grows.
+        Drawdown brake: 30% below peak -> safest stage until it recovers."""
+        b = self.bank
+        stages = b.get("stages") or [{"up_to": None, "tiers": b.get("tiers", [[80, 0.05], [65, 0.035], [50, 0.025]])}]
+        eq = self.equity()
+        peak = max(float(self.state.data.get("peak_equity", 0) or 0), eq, float(b.get("start_usd", 100)))
+        self.state.data["peak_equity"] = round(peak, 2)
+        brake = eq < peak * (1 - b.get("drawdown_brake_pct", 0.30))
+        if brake:
+            st = dict(stages[-1], name=f"{stages[-1].get('name', 'safe')} (drawdown brake)", brake=True)
+            return st
+        for st in stages:
+            if st.get("up_to") is None or eq < float(st["up_to"]):
+                return st
+        return stages[-1]
+
+    def current_tiers(self) -> list:
+        return self.current_stage()["tiers"]
+
     def day_start_equity(self) -> float:
         d = self.state.data.setdefault("day_equity", {})
         if _today() not in d:
@@ -738,7 +758,7 @@ class CopyBot:
         """$ to stake from the bankroll for a bet with this score, or (0, reason to skip)."""
         from scoring import stake_pct
         b = self.bank
-        pct = stake_pct(score, b.get("tiers", [[80, 0.05], [65, 0.035], [50, 0.025]]))
+        pct = stake_pct(score, self.current_tiers())
         if pct <= 0:
             return 0.0, f"score {score} below minimum"
         if ev < b.get("min_ev", 0.0):
@@ -747,7 +767,7 @@ class CopyBot:
         if eq <= self.day_start_equity() * (1 - b.get("daily_stop_pct", 0.15)):
             return 0.0, "daily loss stop reached"
         budget = eq * pct
-        budget = min(budget, eq * b.get("max_game_pct", 0.08) - held_usd)
+        budget = min(budget, eq * self.current_stage().get("max_game_pct", b.get("max_game_pct", 0.08)) - held_usd)
         budget = min(budget, eq * b.get("max_open_pct", 0.7) - self.open_cost())
         budget = min(budget, self.cash())
         if budget < b.get("min_stake_usd", 2.0):
@@ -962,6 +982,9 @@ class CopyBot:
             "equity": round(self.equity(), 2),
             "cash": round(self.cash(), 2),
             "start_usd": float(self.bank.get("start_usd", 100)),
+            "stage": self.current_stage().get("name"),
+            "stage_tiers": self.current_tiers(),
+            "peak": self.state.data.get("peak_equity"),
             "sizing": self.risk.get("sizing"),
             "kalshi_link": self.kalshi_link,
             "open_lots": len(self.state.data["lots"]),
