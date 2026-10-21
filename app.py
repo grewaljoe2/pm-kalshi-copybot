@@ -209,7 +209,7 @@ def index():
     st = BOT.status() if BOT else None
     return render_template_string(
         PAGE, st=st, err=BOT_ERROR, logs=list(LOG_LINES)[-80:][::-1],
-        trades=BOT.recent_journal(40) if BOT else [], ago=_ago, slate=SLATE, best=BEST, props=PROPS,
+        trades=BOT.recent_journal(40) if BOT else [], ago=_ago, slate=SLATE, best=BEST, props=PROPS, combos=(BOT.combo_slate if BOT else {}),
         now=datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
     )
 
@@ -278,6 +278,12 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
 </table></div><div class="k" style="margin-top:6px">Hit chance = how often the player cleared the line in his last {{ 'games' }} (recent games count more), pulled 35% toward Kalshi's price. Score 70+ with a positive edge can go into the combo, one leg per game. Refreshes every 30 min.</div>
 {% elif props.error %}<div class="k">Props scan error: {{ props.error }}</div>
 {% else %}<div class="k">Rating tonight's props (a few minutes after a restart)…</div>{% endif %}</div>
+<div class="card"><h2>Today's combos{% if combos.dry_run %} (test mode, not placed){% endif %}</h2>
+{% if combos.combos %}<div class="scroll"><table><tr><th>Legs</th><th>Hit chance</th><th>Price</th><th>Stake</th><th>Pays</th></tr>
+{% for c in combos.combos %}<tr><td>{% for l in c.legs %}{{ l }}{% if not loop.last %}<br>{% endif %}{% endfor %}<br><span class="k">{{ c.size }}-leg · {{ c.action }}{% if c.note %} · {{ c.note }}{% endif %}</span></td>
+<td><b>{{ '%.0f'|format(100*c.hit) }}%</b></td><td>{{ '%.0f¢'|format(100*c.price) if c.price else '—' }}</td><td>${{ '%.2f'|format(c.stake) }}</td><td>${{ c.payout }}</td></tr>{% endfor %}
+</table></div><div class="k" style="margin-top:6px">Uses {{ combos.legs_used }} of {{ combos.legs_available }} strong legs, one per game, each leg in only one combo. Hit chance = the legs' chances multiplied. Built once a day.</div>
+{% else %}<div class="k">Built once a day from the props above and the whale picks.</div>{% endif %}</div>
 <div class="card"><h2>Today's slate</h2>
 {% if slate %}<div class="grid">
 <div><div class="k">Kalshi games today</div><div class="v">{{ slate.games }}</div></div>

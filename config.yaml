@@ -76,11 +76,13 @@ combos:
   dry_run: true             # log what it would bet; set false after checking the logs
   every_days: 1             # one combo a day (retries every 6h if no strong legs)
   min_legs: 2
-  max_legs: 3
+  max_legs: 4
+  sizes: [2, 2, 3, 3, 4]    # split the day's strong legs into these combos (each leg used once)
   min_score: 70             # whale legs
   min_prop_score: 70        # player-prop legs (see props.py)
   min_hit_chance: 0.30      # skip combos less likely than 30% to hit
-  stake_pct: 0.02           # 2% of balance per combo
+  daily_budget_pct: 0.06    # 6% of balance across all combos, more to the likelier ones
+  min_stake_usd: 1.0
 
 # Bankroll mode (sizing: score). Paper mode tracks a virtual bankroll starting here.
 bankroll:

@@ -1246,111 +1246,129 @@ class CopyBot:
                 if (len(self.state.data["lots"]), len(self.state.data.get("resting", []))) != before:
                     done[key] = time.time()
 
-    # ---- weekly whale combo ----------------------------------------------- #
+    # ---- daily combo slate ------------------------------------------------- #
     _coll_cache: tuple = (0.0, [])
+    combo_slate: dict = {"combos": [], "built": None, "legs_used": 0, "legs_available": 0}
 
-    def weekly_combo(self, picks: list[dict]) -> None:
-        """Build a 2-3 leg Kalshi combo from the week's best pre-game picks (small, capped stake)."""
-        from scoring import fee_per_contract
-        cc = self.cfg.get("combos", {}) or {}
-        if not cc.get("enabled", False) or self.paused or not self.kalshi.pkey:
-            return
-        if not self.state.data.get("combo_reset_v1"):  # switched weekly -> daily with props: run now
-            self.state.data["combo_reset_v1"] = True
-            self.state.data["combo_last"] = 0
-        last = float(self.state.data.get("combo_last", 0) or 0)
-        if time.time() - last < cc.get("every_days", 7) * 86400:
-            return
-        legs, games = [], set()
+    def _combo_pool(self, picks: list[dict], cc: dict) -> list[dict]:
+        """Best qualifying leg per game, most likely first."""
         pool = list(picks) + list(getattr(self, "prop_picks", []) or [])
-        min_hit = float(cc.get("min_hit_chance", 0.30))
-        fair_so_far = 1.0
-        # most likely legs first (score already rewards hit chance and price edge)
-        for p in sorted(pool, key=lambda x: (-x["score"], -x.get("p", x.get("whale_px", 0)))):
+        best: dict[str, dict] = {}
+        for p in pool:
             min_sc = cc.get("min_prop_score", 70) if p.get("kind") == "prop" else cc.get("min_score", 70)
             if (p.get("status") != "pre" or p["score"] < min_sc or p["ev"] <= 0
                     or p["side"] != "yes" or not 0.25 <= p["ask"] <= 0.93):
                 continue
             if p.get("start") and p["start"] < time.time() + 900:
                 continue
-            try:
-                m = self.kdata.market(p["ticker"])
-            except Exception:
+            ev = p.get("event_ticker")
+            if not ev:
+                try:
+                    ev = self.kdata.market(p["ticker"]).get("event_ticker")
+                except Exception:
+                    continue
+            if not ev:
                 continue
-            ev = m.get("event_ticker")
-            game = ev.split("-", 1)[1] if ev and "-" in ev else ev
-            if not ev or game in games:
-                continue  # one leg per game: legs from the same game move together
+            game = ev.split("-", 1)[1] if "-" in ev else ev
             fair = float(p.get("p") or p["whale_px"])
-            if len(legs) >= cc.get("min_legs", 2) and fair_so_far * fair < min_hit:
-                continue  # adding this leg would make the combo too unlikely
-            games.add(game)
-            fair_so_far *= fair
-            label = p["outcome"] if p.get("kind") == "prop" else f'{p["title"]} — {p["outcome"]}'
-            legs.append({"event_ticker": ev, "market_ticker": p["ticker"], "side": "yes",
-                         "fair": fair, "title": label, "start": p.get("start") or self._kalshi_start(m)})
-            if len(legs) >= cc.get("max_legs", 3):
+            leg = {"event_ticker": ev, "market_ticker": p["ticker"], "side": "yes", "fair": fair,
+                   "ask": p["ask"], "score": p["score"], "game": game, "start": p.get("start"),
+                   "title": p["outcome"] if p.get("kind") == "prop" else f'{p["title"]} — {p["outcome"]}'}
+            if game not in best or (leg["score"], fair) > (best[game]["score"], best[game]["fair"]):
+                best[game] = leg  # legs from the same game move together: one per game
+        return sorted(best.values(), key=lambda l: (-l["fair"], -l["score"]))
+
+    def _plan_slate(self, legs: list[dict], cc: dict) -> list[list[dict]]:
+        """Split legs into separate combos (each leg used once). Strongest legs go into the small
+        combos (highest hit chance), the rest fill the bigger ones. A combo below the hit-chance
+        floor is shrunk until it clears it."""
+        sizes = cc.get("sizes") or [2, 2, 3, 3, 4]
+        min_hit = float(cc.get("min_hit_chance", 0.30))
+        left, out = list(legs), []
+        for n in sizes:
+            if len(left) < 2:
                 break
-        if len(legs) < cc.get("min_legs", 2) or fair_so_far < min_hit:
-            if len(legs) >= 1:
-                log.info("COMBO not enough strong legs today (%d legs, hit chance %.0f%%)",
-                         len(legs), 100 * fair_so_far)
-            self.state.data["combo_last"] = time.time() - max(0, cc.get("every_days", 7) - 0.25) * 86400
-            return
-        # find a collection that allows all these events
-        if time.time() - self._coll_cache[0] > 6 * 3600:
-            try:
-                self._coll_cache = (time.time(), self.kalshi.collections())
-            except Exception as e:
-                log.warning("combo: collections lookup failed: %s", e)
-                return
+            take = left[:n]
+            while len(take) > 2 and math.prod(l["fair"] for l in take) < min_hit:
+                take = take[:-1]
+            if len(take) < 2 or math.prod(l["fair"] for l in take) < min_hit:
+                continue
+            out.append(take)
+            left = left[len(take):]
+        return out
+
+    def _build_combo(self, legs: list[dict]) -> tuple[str | None, dict, list]:
+        if time.time() - self._coll_cache[0] > 6 * 3600 or not self._coll_cache[1]:
+            self._coll_cache = (time.time(), self.kalshi.collections())
+        sel = [{k: l[k] for k in ("event_ticker", "market_ticker", "side")} for l in legs]
         want = {l["event_ticker"] for l in legs}
-        coll = None
+        cands = []
         for c in self._coll_cache[1]:
             evs = {e.get("event_ticker") if isinstance(e, dict) else e
                    for e in (c.get("associated_events") or c.get("associated_event_tickers") or [])}
-            if want <= evs and c.get("size_min", 2) <= len(legs) <= c.get("size_max", 10):
-                coll = c
-                break
-        sel = [{k: l[k] for k in ("event_ticker", "market_ticker", "side")} for l in legs]
-        # The listing doesn't always say which events a collection takes: try the sports
-        # multi-game collections directly and let Kalshi accept or reject the legs.
-        cands = [coll] if coll else [c for c in self._coll_cache[1]
-                                     if "SPORTS" in (c.get("collection_ticker") or "").upper()
-                                     or "CROSSCATEGORY" in (c.get("collection_ticker") or "").upper()]
-        combo_tk, cm, errs = None, {}, []
+            if evs and want <= evs:
+                cands.insert(0, c)
+            elif "SPORTS" in (c.get("collection_ticker") or "").upper() or \
+                    "CROSSCATEGORY" in (c.get("collection_ticker") or "").upper():
+                cands.append(c)  # listing doesn't say which events it takes: let Kalshi decide
+        errs = []
         for c in cands:
             try:
-                res = self.kalshi.create_combo(c["collection_ticker"], sel)
-                combo_tk = res.get("market_ticker")
-                if combo_tk:
-                    cm = self.kdata.market(combo_tk)
-                    log.info("COMBO built in collection %s -> %s", c["collection_ticker"], combo_tk)
-                    break
+                tk = self.kalshi.create_combo(c["collection_ticker"], sel).get("market_ticker")
+                if tk:
+                    return tk, self.kdata.market(tk), errs
             except Exception as e:
                 errs.append(f'{c.get("collection_ticker")}: {str(e)[:160]}')
-        if not combo_tk:
-            log.info("COMBO no Kalshi collection accepted these legs %s: %s",
-                     [l["market_ticker"] for l in legs], errs[:3])
-            self.state.data["combo_last"] = time.time() - max(0, cc.get("every_days", 7) - 0.25) * 86400
+        return None, {}, errs
+
+    def weekly_combo(self, picks: list[dict]) -> None:
+        """Daily combo slate: all strong legs (whale picks + player props), one per game, split
+        into several 2-4 leg combos. Daily budget is shared, more to the likelier combos."""
+        from scoring import fee_per_contract
+        cc = self.cfg.get("combos", {}) or {}
+        if not cc.get("enabled", False) or self.paused or not self.kalshi.pkey:
             return
-        fair = 1.0
-        for l in legs:
-            fair *= l["fair"]
-        ask = _px(cm, "yes_ask")
-        stake = self.equity() * cc.get("stake_pct", 0.02)
-        price = math.floor(fair * 100) / 100
-        take = ask is not None and 0 < ask <= fair - fee_per_contract(ask, self.fee_rate)
-        px = ask if take else price
-        count = math.floor(stake / px) if px and px > 0 else 0
-        log.info("COMBO %s legs=%s fair=%.3f kalshi_ask=%s -> %s %d @ %.2f (stake $%.2f)%s",
-                 combo_tk, [l["title"] for l in legs], fair, ask, "TAKE" if take else "LIMIT", count, px or 0,
-                 stake, "  [dry run]" if cc.get("dry_run", True) else "")
-        if cc.get("dry_run", True) or count < 1 or not combo_tk:
-            self.state.data["combo_last"] = time.time()
+        if not self.state.data.get("combo_reset_v2"):  # new slate builder: run now
+            self.state.data["combo_reset_v2"] = True
+            self.state.data["combo_last"] = 0
+        if time.time() - float(self.state.data.get("combo_last", 0) or 0) < cc.get("every_days", 1) * 86400:
             return
+        legs = self._combo_pool(picks, cc)
+        plan = self._plan_slate(legs, cc)
+        if not plan:
+            log.info("COMBO slate: no combos today (%d strong legs)", len(legs))
+            self.state.data["combo_last"] = time.time() - max(0, cc.get("every_days", 1) - 0.25) * 86400
+            return
+        budget = self.equity() * float(cc.get("daily_budget_pct", 0.06))
+        hits = [math.prod(l["fair"] for l in c) for c in plan]
+        dry = cc.get("dry_run", True)
+        slate = []
+        for combo, hit in zip(plan, hits):
+            stake = max(float(cc.get("min_stake_usd", 1.0)), budget * hit / sum(hits))
+            combo_tk, cm, errs = self._build_combo(combo)
+            ask = _px(cm, "yes_ask") if combo_tk else None
+            price = math.floor(hit * 100) / 100
+            take = ask is not None and 0 < ask <= hit - fee_per_contract(ask, self.fee_rate)
+            px = ask if take else price
+            count = math.floor(stake / px) if px and px > 0 else 0
+            row = {"legs": [l["title"] for l in combo], "size": len(combo), "hit": round(hit, 3),
+                   "ticker": combo_tk, "ask": ask, "price": px, "count": count, "stake": round(count * (px or 0), 2),
+                   "payout": count, "action": ("TAKE" if take else "LIMIT") if combo_tk else "not offered",
+                   "note": "; ".join(errs[:1]) if not combo_tk else ""}
+            slate.append(row)
+            log.info("COMBO %d-leg hit %.0f%% %s -> %s %d @ %s (stake $%.2f, pays $%d)%s %s",
+                     len(combo), 100 * hit, row["legs"], row["action"], count, px, row["stake"], count,
+                     "  [dry run]" if dry else "", row["note"])
+            if dry or count < 1 or not combo_tk:
+                continue
+            self._place_combo(combo_tk, combo, hit, ask, price, count, take)
+        self.combo_slate = {"combos": slate, "built": time.time(), "dry_run": dry,
+                            "legs_used": sum(len(c) for c in plan), "legs_available": len(legs)}
+        self.state.data["combo_last"] = time.time()
+
+    def _place_combo(self, combo_tk, legs, fair, ask, price, count, take) -> None:
         tgt = Target(combo_tk, "yes")
-        name = "Combo"
+        name = f"Combo {len(legs)}-leg"
         title = " + ".join(l["title"] for l in legs)
         if take:
             filled, cost = self._execute(tgt, "buy", count, ask)
@@ -1360,25 +1378,25 @@ class CopyBot:
                 self.state.add_spent(cost + fee)
                 self.state.open_lot(name, combo_tk, "yes", filled, cost / filled, fee, title)
                 self._journal(name, {"title": title, "outcome": "combo", "price": fair}, tgt, "buy", filled, cost / filled)
-        else:
-            starts = [x for x in (l.get("start") for l in legs) if x]
-            expires = int(min(min(starts) - 300 if starts else time.time() + 86400, time.time() + 86400))
-            if expires > time.time() + 300:
-                oid = f"paper-{uuid.uuid4()}"
-                if self.mode == "live":
-                    try:
-                        oid = self.kalshi.create_order(combo_tk, "yes", "buy", count, price, None,
-                                                       post_only=True, expiration_ts=expires).get("order_id")
-                    except Exception as e:
-                        log.error("combo limit order failed: %s", e)
-                        oid = None
-                if oid:
-                    self.state.data.setdefault("resting", []).append(
-                        {"id": oid, "ticker": combo_tk, "side": "yes", "price": price, "count": count,
-                         "remaining": count, "filled": 0, "fee_rate": 0.0175, "whale": name, "title": title,
-                         "outcome": "combo", "score": None, "expires": expires, "placed": int(time.time()),
-                         "pm_price": fair})
-        self.state.data["combo_last"] = time.time()
+            return
+        starts = [x for x in (l.get("start") for l in legs) if x]
+        expires = int(min(min(starts) - 300 if starts else time.time() + 86400, time.time() + 86400))
+        if expires <= time.time() + 300:
+            return
+        oid = f"paper-{uuid.uuid4()}"
+        if self.mode == "live":
+            try:
+                oid = self.kalshi.create_order(combo_tk, "yes", "buy", count, price, None,
+                                               post_only=True, expiration_ts=expires).get("order_id")
+            except Exception as e:
+                log.error("combo limit order failed: %s", e)
+                oid = None
+        if oid:
+            self.state.data.setdefault("resting", []).append(
+                {"id": oid, "ticker": combo_tk, "side": "yes", "price": price, "count": count,
+                 "remaining": count, "filled": 0, "fee_rate": 0.0175, "whale": name, "title": title,
+                 "outcome": "combo", "score": None, "expires": expires, "placed": int(time.time()),
+                 "pm_price": fair})
 
     def check_settlements(self) -> None:
         """Close out lots on Kalshi markets that have settled, so wins/losses are counted."""
