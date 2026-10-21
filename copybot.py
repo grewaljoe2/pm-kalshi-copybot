@@ -1328,16 +1328,15 @@ class CopyBot:
         cc = self.cfg.get("combos", {}) or {}
         if not cc.get("enabled", False) or self.paused or not self.kalshi.pkey:
             return
-        if not self.state.data.get("combo_reset_v2"):  # new slate builder: run now
-            self.state.data["combo_reset_v2"] = True
+        if not self.state.data.get("combo_reset_v3"):  # new slate builder: run now
+            self.state.data["combo_reset_v3"] = True
             self.state.data["combo_last"] = 0
         if time.time() - float(self.state.data.get("combo_last", 0) or 0) < cc.get("every_days", 1) * 86400:
             return
         legs = self._combo_pool(picks, cc)
         plan = self._plan_slate(legs, cc)
         if not plan:
-            log.info("COMBO slate: no combos today (%d strong legs)", len(legs))
-            self.state.data["combo_last"] = time.time() - max(0, cc.get("every_days", 1) - 0.25) * 86400
+            log.info("COMBO slate: no combos yet (%d strong legs) - will retry when new picks arrive", len(legs))
             return
         budget = self.equity() * float(cc.get("daily_budget_pct", 0.06))
         hits = [math.prod(l["fair"] for l in c) for c in plan]
