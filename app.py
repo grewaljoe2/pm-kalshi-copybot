@@ -92,9 +92,15 @@ def _authed() -> bool:
     return bool(PASSWORD) and a is not None and hmac.compare_digest(a.password or "", PASSWORD)
 
 
+PUBLIC = os.environ.get("PUBLIC_DASHBOARD") == "1"
+
+
 @app.before_request
 def require_auth():
     if request.path == "/healthz":
+        return None
+    # Public mode: no login while paper trading. Once live, the pause button needs the password again.
+    if PUBLIC and (request.method == "GET" or os.environ.get("BOT_MODE", "paper") != "live"):
         return None
     if not PASSWORD:
         return Response("Set the DASHBOARD_PASSWORD environment variable.", 503)
