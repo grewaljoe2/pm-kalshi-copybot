@@ -368,6 +368,8 @@ class Kalshi:
                            headers=self._headers(method, path), timeout=15, **kw)
         if r.status_code >= 400:
             raise RuntimeError(f"Kalshi {method} {path} -> {r.status_code}: {r.text[:300]}")
+        if r.status_code == 204 or not r.content.strip():
+            return {}  # e.g. accepting an RFQ quote returns 204 with no body
         return r.json()
 
     def market(self, ticker: str) -> dict:
@@ -567,6 +569,7 @@ class Kalshi:
                 return out
             q = best[1]
             self._req("PUT", f"/communications/rfqs/{rid}/quotes/{q['id']}/accept", json={"accepted_side": "no"})
+            out["accepted"] = True
             # maker has ~3s to confirm, then ~1s to execute (combo markets are HVM)
             for _ in range(8):
                 time.sleep(1.5)
@@ -589,7 +592,7 @@ class Kalshi:
                 out["status"] = "accepted_no_fill_yet"
             return out
         except Exception as e:
-            out.update(status="error", error=str(e)[:200])
+            out.update(status="accepted_unknown" if out.get("accepted") else "error", error=str(e)[:200])
             return out
         finally:
             try:
@@ -824,6 +827,12 @@ class CopyBot:
                     self.check_resting()
                 except Exception as e:
                     log.warning("resting check failed: %s", e)
+            if time.time() - getattr(self, "_last_reconcile", 0) > 300:
+                self._last_reconcile = time.time()
+                try:
+                    self.reconcile_combos()
+                except Exception as e:
+                    log.warning("combo reconcile failed: %s", e)
             if time.time() - self._last_catch_up > self.cfg.get("catch_up", {}).get("every_seconds", 900):
                 self._last_catch_up = time.time()
                 try:
@@ -1554,8 +1563,52 @@ class CopyBot:
             slates = [s for s in slates if s.get("league") != lg] + [
                 {"league": lg, "built": time.time(), "combos": rows, "legs_available": len(lg_legs),
                  "legs_used": sum(len(c) for c in plan)}]
+        try:
+            self.reconcile_combos()
+        except Exception as e:
+            log.warning("combo reconcile failed: %s", e)
         self.combo_slate = {"slates": slates, "dry_run": cc.get("dry_run", True),
                             "combos": [r | {"league": s["league"]} for s in slates for r in s["combos"]]}
+
+    def reconcile_combos(self) -> None:
+        """Make the ledger match Kalshi for combo markets: record combo contracts bought through
+        quotes that the ledger missed, and cancel a waiting limit order if that combo is already held."""
+        if self.mode != "live" or not self.kalshi.pkey:
+            return
+        try:
+            j = self.kalshi._req("GET", "/portfolio/positions", params={"limit": 500, "count_filter": "position"})
+        except Exception as e:
+            log.warning("combo reconcile: positions failed: %s", e)
+            return
+        rows = j.get("market_positions") or []
+        for p in rows:
+            tk = p.get("ticker") or ""
+            if not tk.startswith("KXMVE"):
+                continue
+            held = float(p.get("position_fp") or p.get("position") or 0)
+            if held <= 0:
+                continue  # we only buy YES on combos
+            have = self.state.position(tk, "yes")
+            # a waiting limit order on a combo we already hold: cancel it (avoid doubling up)
+            for r in list(self.state.data.get("resting", [])):
+                if r.get("ticker") == tk and str(r.get("whale", "")).startswith("Combo"):
+                    try:
+                        self.kalshi.cancel_order(r["id"], tk)
+                        self.state.data["resting"].remove(r)
+                        log.info("COMBO cancelled duplicate limit order on %s (already hold %g)", tk, held)
+                    except Exception as e:
+                        log.warning("COMBO cancel duplicate failed: %s", e)
+            missing = int(held - have)
+            if missing > 0:
+                cost = float(p.get("market_exposure_dollars") or (float(p.get("market_exposure") or 0) / 100) or 0)
+                px = round(cost / held, 4) if held and cost else 0.5
+                title = next((r.get("title") for r in self.state.data.get("events", [])[::-1]
+                              if r.get("kalshi_ticker") == tk), None) or f"combo {tk[-10:]}"
+                fee = kalshi_fee(missing, px, self.fee_rate)
+                self.state.add_position(tk, "yes", missing)
+                self.state.open_lot("Combo (quote)", tk, "yes", missing, px, fee, title)
+                log.info("COMBO reconciled %d contracts of %s @ %.3f bought through a quote", missing, tk, px)
+        self.state.save()
 
     def _combo_stake(self, hit: float, price: float, cc: dict) -> float:
         """Half-Kelly on the edge, capped per combo and by what's left of today's combo budget."""
@@ -1601,6 +1654,9 @@ class CopyBot:
                     self._journal(name, {"title": title, "outcome": "combo", "price": hit},
                                   Target(combo_tk, "yes"), "buy", n, px)
                     row.update(action="BOUGHT (quote)", price=px, count=n, stake=round(n * px, 2), payout=n, placed=True)
+                elif q.get("accepted"):
+                    row.update(action=f"quote accepted ({q['status']}), checking fills", price=q.get("best"), placed=True)
+                    self._add_combo_spent(stake)
                 else:
                     # no maker quote at our price: wait with a limit order a bit under fair
                     px = math.floor(max_px * 100) / 100
