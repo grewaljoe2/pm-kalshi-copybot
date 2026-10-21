@@ -64,6 +64,24 @@ def _bot_loop():
 
 threading.Thread(target=_bot_loop, name="copybot", daemon=True).start()
 
+
+def _keep_awake():
+    """Render's free plan sleeps after 15 min without visitors. When KEEP_AWAKE=1,
+    visit our own public URL every 10 min so the bot keeps running."""
+    url = os.environ.get("RENDER_EXTERNAL_URL")
+    if not url:
+        return
+    import requests
+    while not STOP.wait(600):
+        try:
+            requests.get(url.rstrip("/") + "/healthz", timeout=20)
+        except Exception as e:
+            log.warning("keep-awake ping failed: %s", e)
+
+
+if os.environ.get("KEEP_AWAKE") == "1":
+    threading.Thread(target=_keep_awake, name="keep-awake", daemon=True).start()
+
 # ---- web ------------------------------------------------------------------- #
 app = Flask(__name__)
 PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
