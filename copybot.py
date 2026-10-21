@@ -492,6 +492,19 @@ class CopyBot:
         self.balance: float | None = None
         self._last_settle_check = 0.0
         self._last_catch_up = 0.0
+        # Switching paper <-> live: archive the old ledger so paper bets never mix with real money
+        last_mode = self.state.data.get("ledger_mode")
+        if last_mode and last_mode != self.mode:
+            arch = self.state.data.setdefault("archive", {})
+            arch[f"{last_mode}_{int(time.time())}"] = {
+                k: self.state.data.get(k) for k in ("lots", "closed", "events", "positions", "spent_by_day",
+                                                    "day_equity", "peak_equity", "catchup_done", "board_done")}
+            for k, v in (("lots", []), ("closed", []), ("events", []), ("positions", {}), ("spent_by_day", {}),
+                         ("day_equity", {}), ("catchup_done", {}), ("board_done", {})):
+                self.state.data[k] = v
+            self.state.data.pop("peak_equity", None)
+            log.warning("Mode changed %s -> %s: previous ledger archived, starting clean", last_mode, self.mode)
+        self.state.data["ledger_mode"] = self.mode
         self.whale_stats: dict = self.state.data.get("whale_stats", {})  # wallet -> screener stats
         self.screen_buys: list = []  # recent buys of other top whales (from the screener)
         self.bank = cfg.get("bankroll", {}) or {}

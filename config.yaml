@@ -63,7 +63,7 @@ live_games:
 
 # Bankroll mode (sizing: score). Paper mode tracks a virtual bankroll starting here.
 bankroll:
-  start_usd: 100
+  start_usd: 98.49          # live: your deposit (used for the Return %)
   # Growth plan: heavy while small, taper as the account grows. [min score, % of balance per bet]
   stages:
     - name: "1 growth"
