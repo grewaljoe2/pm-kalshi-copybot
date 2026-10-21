@@ -652,8 +652,9 @@ class CopyBot:
             if m.get("status") not in (None, "open", "active"):
                 continue
             ask = _px(m, f'{p["side"]}_ask')
-            if not ask or ask <= 0 or ask >= 1 or ask > p["ask"] + 0.01 or ask > self.risk["max_entry_price"]:
-                continue  # price moved or unusable
+            if (not ask or ask <= 0 or ask >= 1 or ask > p["ask"] + 0.01 or ask < p["ask"] - 0.03
+                    or p["whale_px"] - ask > 0.08 or ask > self.risk["max_entry_price"]):
+                continue  # price moved, game likely started, or unusable
             if 100 * self.fee_rate * (1 - ask) > self.risk.get("max_fee_pct", 6):
                 continue
             log.info("[Board] %s %s -> %s %s  score %d EV %+.1f%%  (%d traders: %s)", p["title"], p["outcome"],

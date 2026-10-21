@@ -66,8 +66,15 @@ def expected_value(whale_px: float, ask: float, stats: dict | None, rate: float 
     return (p - ask - fee_per_contract(ask, rate)) / ask
 
 
+MAX_DISCOUNT = 0.08  # Kalshi this much cheaper than the whale paid = the situation changed
+
+
 def score_bet(*, whale_px: float, ask: float, whale_usd: float, stats: dict | None,
               same: int = 0, opposite: int = 0, rate: float = 0.07) -> dict:
+    if whale_px - ask > MAX_DISCOUNT:
+        # Not a bargain: the game has likely started, or news/results moved the price.
+        return {"score": 0, "parts": {"stale": True}, "ev": -1.0,
+                "note": "price dropped a lot since the whale bet"}
     parts = {
         "record": round(whale_record_points(stats), 1),
         "conviction": round(conviction_points(whale_usd, stats), 1),

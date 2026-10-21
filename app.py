@@ -274,7 +274,9 @@ def _report_loop():
             res = screener.screen()
             SCREEN[:] = res
             if BOT is not None:
-                good = [r for r in res if (r.get("pnl_month") or 0) > 0 and (r.get("pnl_all") or 0) > 0]
+                good = [r for r in res if (r.get("pnl_month") or 0) > 0 and (r.get("pnl_all") or 0) > 0
+                        and (r.get("per_day") or 0) <= 150 and (r.get("median_usd") or 0) >= 20
+                        and (r.get("extreme_price_pct") or 0) <= 30]
                 stats = {r["wallet"]: {k: r.get(k) for k in ("name", "pnl_month", "pnl_all", "median_usd",
                                                              "per_day", "score")} for r in res}
                 BOT.whale_stats.update(stats)
@@ -474,6 +476,8 @@ def compute_best() -> list[dict]:
                          key=lambda s: s.get("pnl_all") or 0, default=None)
         sc = score_bet(whale_px=px, ask=ask, whale_usd=sample["usd"], stats=best_stats or None,
                        same=len(whales) - 1, opposite=len(opp), rate=BOT.fee_rate)
+        if sc.get("parts", {}).get("stale"):
+            continue
         pct = stake_pct(sc["score"], BOT.bank.get("tiers", [[80, 0.05], [65, 0.035], [50, 0.025]]))
         out.append({"title": sample["title"], "outcome": outc, "whales": len(whales),
                     "latest_ts": max(x["ts"] for x in bs),
