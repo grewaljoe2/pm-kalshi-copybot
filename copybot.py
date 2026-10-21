@@ -374,7 +374,64 @@ class Kalshi:
         return self._req("GET", f"/markets/{ticker}")["market"]
 
     def balance_usd(self) -> float:
+        # Without exchange_index, Kalshi's balance covers every exchange shard.
         return self._req("GET", "/portfolio/balance").get("balance", 0) / 100.0
+
+    # ---- exchange shards ---------------------------------------------------- #
+    # Kalshi splits markets across exchange shards, each with its own cash. Sports like
+    # basketball/tennis/baseball live on shard 3, combos on shard 1. API orders don't move
+    # money between shards, so the bot moves just enough cash before each buy.
+    _SHARD_GUESS = (("KXMVE", 1), ("KXNBA", 3), ("KXWNBA", 3), ("KXNCAAMB", 3), ("KXNCAAWB", 3),
+                    ("KXMLB", 3), ("KXATP", 3), ("KXWTA", 3), ("KXTENNIS", 3))
+
+    def shard_balances(self) -> dict[int, float]:
+        j = self._req("GET", "/portfolio/balance")
+        out = {int(b.get("exchange_index") or 0): float(b.get("balance") or 0)
+               for b in j.get("balance_breakdown") or []}
+        if not out:
+            out = {0: (j.get("balance") or 0) / 100.0}
+        return out
+
+    def market_shard(self, ticker: str) -> int:
+        cache = self.__dict__.setdefault("_shard_cache", {})
+        if ticker in cache:
+            return cache[ticker]
+        idx = None
+        try:
+            v = self.market(ticker).get("exchange_index")
+            idx = int(v) if v not in (None, "") else None
+        except Exception:
+            pass
+        if idx is None:
+            idx = next((s for p, s in self._SHARD_GUESS if ticker.upper().startswith(p)), 0)
+        cache[ticker] = idx
+        return idx
+
+    def ensure_shard_funds(self, ticker: str, need_usd: float, wait_s: float = 12) -> bool:
+        """Move cash to the market's shard if it has less than need_usd. True = funded."""
+        idx = self.market_shard(ticker)
+        bals = self.shard_balances()
+        have = bals.get(idx, 0.0)
+        if have + 1e-6 >= need_usd:
+            return True
+        short = need_usd - have + 0.25  # small buffer for rounding / fees
+        for src, avail in sorted(bals.items(), key=lambda kv: -kv[1]):
+            if src == idx or avail <= 0.01 or short <= 0:
+                continue
+            amt = min(short, avail)
+            self._req("POST", "/portfolio/intra_exchange_instance_transfer", json={
+                "client_transfer_id": str(uuid.uuid4()),
+                "source": "event_contract", "destination": "event_contract",
+                "amount": int(math.floor(amt * 10000)),  # centicents
+                "source_exchange_shard": src, "destination_exchange_shard": idx})
+            log.info("  moved $%.2f from shard %d to shard %d for %s", amt, src, idx, ticker)
+            short -= amt
+        deadline = time.time() + wait_s  # transfers are processed asynchronously
+        while time.time() < deadline:
+            time.sleep(1.5)
+            if self.shard_balances().get(idx, 0.0) + 1e-6 >= need_usd:
+                return True
+        return False
 
     def create_order(self, ticker: str, side: str, action: str, count: int,
                      price: float, tif: str | None, post_only: bool = False,
@@ -404,7 +461,22 @@ class Kalshi:
             body["post_only"] = True
         if expiration_ts and body["time_in_force"] == "good_till_canceled":
             body["expiration_time"] = int(expiration_ts)
-        res = self._req("POST", "/portfolio/events/orders", json=body)
+        need = 0.0
+        if action == "buy":
+            need = count * (price + 0.07 * price * (1 - price)) + 0.02
+            try:
+                self.ensure_shard_funds(ticker, need)
+            except Exception as e:
+                log.warning("  shard funding check failed for %s: %s", ticker, e)
+        try:
+            res = self._req("POST", "/portfolio/events/orders", json=body)
+        except RuntimeError as e:
+            if action != "buy" or "shard" not in str(e).lower():
+                raise
+            self.__dict__.setdefault("_shard_cache", {}).pop(ticker, None)
+            self.ensure_shard_funds(ticker, need, wait_s=20)
+            body["client_order_id"] = str(uuid.uuid4())
+            res = self._req("POST", "/portfolio/events/orders", json=body)
         filled = float(res.get("fill_count") or 0)
         remaining = float(res.get("remaining_count") or 0)
         status = "executed" if remaining <= 0 and filled > 0 else (
