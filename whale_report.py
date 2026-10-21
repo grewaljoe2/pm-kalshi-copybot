@@ -6,6 +6,7 @@ APIs, no keys) and is shown on the dashboard at /report.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections import Counter
 
@@ -124,26 +125,56 @@ def build(wallet: str, match_min_usd: float = 500) -> dict:
     except Exception as e:
         rep["errors"].append(f"trades: {e}")
 
-    # ---- Kalshi match candidates for sizable open positions ----
+    rep["_positions"] = pos
+    return rep
+
+
+def add_matches(rep: dict, match_min_usd: float = 500) -> None:
+    """Kalshi match candidates for sizable open positions (slow part, done after the summary)."""
+    import difflib
+    from find_matches import tokens
     try:
         km = kalshi_markets()
         rep["kalshi_markets_scanned"] = len(km)
+        for m in km:
+            if "_tok" not in m:
+                m["_tok"] = tokens(m["_text"])
+        # inverted index: token -> markets containing it (fast pre-filter)
+        index: dict[str, list[int]] = {}
+        for i, m in enumerate(km):
+            for tok in m["_tok"]:
+                index.setdefault(tok, []).append(i)
         cands = []
-        for p in pos:
+        for p in rep.get("_positions", []):
             if float(p.get("currentValue") or 0) < match_min_usd:
                 continue
             title = p.get("title", "")
-            best = sorted(km, key=lambda m: score(title, m["_text"]), reverse=True)[:3]
+            tt = tokens(title)
+            hits: dict[int, float] = {}
+            n = len(km)
+            for tok in tt:
+                ids = index.get(tok, [])
+                if not ids:
+                    continue
+                w = math.log(1 + n / len(ids))  # rarer words count more
+                for i in ids:
+                    hits[i] = hits.get(i, 0.0) + w
+            short = sorted(hits, key=lambda i: -hits[i])[:60]
+            scored = []
+            for i in short:
+                m = km[i]
+                jac = len(tt & m["_tok"]) / max(1, len(tt | m["_tok"]))
+                seq = difflib.SequenceMatcher(None, title.lower(), m["_text"].lower()).ratio()
+                scored.append((0.6 * jac + 0.4 * seq, m))
+            scored.sort(key=lambda x: -x[0])
             cands.append({
                 "pm_title": title, "outcome": p.get("outcome"),
                 "condition_id": p.get("conditionId"),
                 "value": round(float(p.get("currentValue") or 0), 2),
-                "matches": [{"ticker": m["ticker"], "text": m["_text"][:120],
-                             "score": round(score(title, m["_text"]), 2),
-                             "close": m.get("close_time")} for m in best],
+                "end": p.get("endDate"),
+                "matches": [{"ticker": m["ticker"], "text": m["_text"][:120], "score": round(sc, 2),
+                             "close": m.get("close_time")} for sc, m in scored[:3]],
             })
         rep["kalshi_candidates"] = sorted(cands, key=lambda c: -c["value"])[:25]
     except Exception as e:
-        rep["errors"].append(f"kalshi: {e}")
-
-    return rep
+        rep.setdefault("errors", []).append(f"kalshi: {e}")

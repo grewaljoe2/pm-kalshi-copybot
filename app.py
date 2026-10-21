@@ -227,6 +227,8 @@ def _report_loop():
                 log.info("WHALE_REPORT %s", json.dumps(summary, default=str))
                 for p in (rep.get("open") or {}).get("top", []):
                     log.info("WHALE_POS %s", json.dumps(p, default=str))
+                whale_report.add_matches(rep)
+                log.info("WHALE_SCANNED %s kalshi markets", rep.get("kalshi_markets_scanned"))
                 for c in rep.get("kalshi_candidates", []):
                     log.info("WHALE_MATCH %s", json.dumps(c, default=str))
             except Exception as e:
