@@ -300,14 +300,18 @@ class Kalshi:
             return {}
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import padding
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
         ts = str(int(time.time() * 1000))
         msg = (ts + method.upper() + self.prefix + path.split("?")[0]).encode()
-        sig = self.pkey.sign(
-            msg,
-            padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
-                        salt_length=padding.PSS.DIGEST_LENGTH),
-            hashes.SHA256(),
-        )
+        if isinstance(self.pkey, Ed25519PrivateKey):  # Kalshi's recommended key type
+            sig = self.pkey.sign(msg)
+        else:  # RSA: PSS + SHA-256, salt = digest length
+            sig = self.pkey.sign(
+                msg,
+                padding.PSS(mgf=padding.MGF1(hashes.SHA256()),
+                            salt_length=padding.PSS.DIGEST_LENGTH),
+                hashes.SHA256(),
+            )
         return {
             "KALSHI-ACCESS-KEY": self.key_id,
             "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
