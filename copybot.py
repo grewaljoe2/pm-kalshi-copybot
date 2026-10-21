@@ -496,7 +496,9 @@ class Kalshi:
 
     def cancel_order(self, order_id: str, ticker: str | None = None) -> None:
         """Cancel a resting order. Tries the V2 forms; logs each failure so the right one is known."""
-        tries = [("DELETE", f"/portfolio/events/orders/{order_id}", {"params": {"ticker": ticker}} if ticker else {}),
+        tries = [("DELETE", "/portfolio/events/orders/batched",
+                  {"json": {"orders": [{"order_id": order_id, **({"ticker": ticker} if ticker else {})}]}}),
+                 ("DELETE", f"/portfolio/events/orders/{order_id}", {"params": {"ticker": ticker}} if ticker else {}),
                  ("DELETE", f"/portfolio/events/orders/{order_id}", {}),
                  ("POST", f"/portfolio/events/orders/{order_id}/cancel", {"json": {"ticker": ticker} if ticker else {}}),
                  ("DELETE", "/portfolio/events/orders/batched",
@@ -545,7 +547,7 @@ class Kalshi:
             deadline, best = time.time() + wait_s, None
             while time.time() < deadline:
                 time.sleep(2.0)
-                qs = self._req("GET", "/communications/quotes", params={"rfq_id": rid, "limit": 100}).get("quotes") or []
+                qs = self._req("GET", "/communications/quotes", params={"rfq_id": rid, "rfq_user_filter": "self", "limit": 100}).get("quotes") or []
                 for q in qs:
                     if q.get("status") not in (None, "open"):
                         continue
@@ -568,7 +570,7 @@ class Kalshi:
             # maker has ~3s to confirm, then ~1s to execute (combo markets are HVM)
             for _ in range(8):
                 time.sleep(1.5)
-                st = self._req("GET", "/communications/quotes", params={"rfq_id": rid, "limit": 100}).get("quotes") or []
+                st = self._req("GET", "/communications/quotes", params={"rfq_id": rid, "rfq_user_filter": "self", "limit": 100}).get("quotes") or []
                 me = next((x for x in st if x.get("id") == q["id"]), {})
                 if me.get("status") == "executed":
                     break
