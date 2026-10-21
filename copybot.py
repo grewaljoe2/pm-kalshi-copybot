@@ -377,7 +377,8 @@ class Kalshi:
         return self._req("GET", "/portfolio/balance").get("balance", 0) / 100.0
 
     def create_order(self, ticker: str, side: str, action: str, count: int,
-                     price: float, tif: str) -> dict:
+                     price: float, tif: str | None, post_only: bool = False,
+                     expiration_ts: int | None = None) -> dict:
         body = {
             "ticker": ticker,
             "client_order_id": str(uuid.uuid4()),
@@ -386,11 +387,22 @@ class Kalshi:
             "count": int(count),
             "type": "limit",
             f"{side}_price_dollars": f"{price:.4f}",
-            "time_in_force": tif,
         }
+        if tif:
+            body["time_in_force"] = tif
+        if post_only:
+            body["post_only"] = True     # rest on the book as a maker; never take
+        if expiration_ts:
+            body["expiration_ts"] = int(expiration_ts)
         if action == "sell":
             body["reduce_only"] = True
         return self._req("POST", "/portfolio/orders", json=body)["order"]
+
+    def get_order(self, order_id: str) -> dict:
+        return self._req("GET", f"/portfolio/orders/{order_id}")["order"]
+
+    def cancel_order(self, order_id: str) -> None:
+        self._req("DELETE", f"/portfolio/orders/{order_id}")
 
 
 def kalshi_fee(count: int, price: float, rate: float = 0.07) -> float:
@@ -503,7 +515,7 @@ class CopyBot:
                 k: self.state.data.get(k) for k in ("lots", "closed", "events", "positions", "spent_by_day",
                                                     "day_equity", "peak_equity", "catchup_done", "board_done")}
             for k, v in (("lots", []), ("closed", []), ("events", []), ("positions", {}), ("spent_by_day", {}),
-                         ("day_equity", {}), ("catchup_done", {}), ("board_done", {})):
+                         ("day_equity", {}), ("catchup_done", {}), ("board_done", {}), ("resting", [])):
                 self.state.data[k] = v
             self.state.data.pop("peak_equity", None)
             log.warning("Mode changed %s -> %s: previous ledger archived, starting clean", last_mode, self.mode)
@@ -517,7 +529,7 @@ class CopyBot:
                 k: self.state.data.get(k) for k in ("lots", "closed", "events", "positions", "spent_by_day",
                                                     "day_equity", "peak_equity", "catchup_done", "board_done")}
             for k, v in (("lots", []), ("closed", []), ("events", []), ("positions", {}), ("spent_by_day", {}),
-                         ("day_equity", {}), ("catchup_done", {}), ("board_done", {})):
+                         ("day_equity", {}), ("catchup_done", {}), ("board_done", {}), ("resting", [])):
                 self.state.data[k] = v
             self.state.data.pop("peak_equity", None)
             log.warning("Paper bets found in the live ledger: archived, starting clean")
@@ -584,6 +596,12 @@ class CopyBot:
                 self.process_board_queue()
             except Exception as e:
                 log.warning("board picks failed: %s", e)
+            if time.time() - getattr(self, "_last_resting", 0) > self.cfg.get("limit_orders", {}).get("check_seconds", 30):
+                self._last_resting = time.time()
+                try:
+                    self.check_resting()
+                except Exception as e:
+                    log.warning("resting check failed: %s", e)
             if time.time() - self._last_catch_up > self.cfg.get("catch_up", {}).get("every_seconds", 900):
                 self._last_catch_up = time.time()
                 try:
@@ -653,7 +671,10 @@ class CopyBot:
         return len(same), len(opp - same)
 
     def open_cost(self) -> float:
-        return sum(l["cost"] + l.get("fee", 0) for l in self.state.data["lots"])
+        lots = sum(l["cost"] + l.get("fee", 0) for l in self.state.data["lots"])
+        resting = sum(r["remaining"] * r["price"] for r in self.state.data.get("resting", []))
+        return lots + resting
+
 
     def equity(self) -> float:
         """Paper: starting bankroll + settled P&L. Live: Kalshi cash + money in open bets."""
@@ -757,12 +778,7 @@ class CopyBot:
             name = f"{name} · live"
         else:
             slip = r["max_slippage"]
-        if ask > whale_px + slip + 1e-9:
-            return self._skip(t, name, f"Kalshi ask {ask:.3f} > whale {whale_px:.3f} + slippage")
-        if ask > r["max_entry_price"]:
-            return self._skip(t, name, f"price {ask:.3f} above max_entry_price")
-
-        # score the bet
+        # score the bet at Kalshi's current ask
         from scoring import score_bet, stake_pct
         addr = whale.get("address", "").lower()
         stats = self.whale_stats.get(addr)
@@ -771,6 +787,17 @@ class CopyBot:
                        same=same, opposite=opp, rate=self.fee_rate)
         log.info("  score %d (EV %+.1f%%) %s  whales same/opp %d/%d", sc["score"], 100 * sc["ev"],
                  sc["parts"], same, opp)
+
+        # Buying at the ask isn't worth it? Pre-game, rest a limit order at a fair price instead.
+        take_ok = (ask <= whale_px + slip + 1e-9 and ask <= r["max_entry_price"]
+                   and sc["ev"] >= self.bank.get("min_ev", 0.0))
+        lim = self.cfg.get("limit_orders", {}) or {}
+        if not take_ok and r["sizing"] == "score" and lim.get("enabled", False) and not is_live:
+            return self._place_resting(name, t, tgt, whale_px, whale_usd, stats, same, opp, ask, m, cls)
+        if ask > whale_px + slip + 1e-9:
+            return self._skip(t, name, f"Kalshi ask {ask:.3f} > whale {whale_px:.3f} + slippage")
+        if ask > r["max_entry_price"]:
+            return self._skip(t, name, f"price {ask:.3f} above max_entry_price")
 
         # sizing
         held_usd = self.state.position(tgt.ticker, tgt.side) * ask
@@ -805,6 +832,113 @@ class CopyBot:
             self.state.open_lot(name, tgt.ticker, tgt.side, filled, px, fee, t.get("title") or "")
             self.state.data["lots"][-1]["score"] = sc["score"]
             self._journal(name, t, tgt, "buy", filled, px, score=sc["score"])
+
+    # ---- limit (resting) orders ------------------------------------------- #
+    def _place_resting(self, name, t, tgt: Target, fair_px, whale_usd, stats, same, opp, ask, m, cls) -> None:
+        """Rest a post-only buy at the best price that still has positive EV with the (lower) maker fee."""
+        from scoring import score_bet, expected_value
+        lim = self.cfg.get("limit_orders", {}) or {}
+        rate = float(lim.get("maker_fee_rate", 0.0175))
+        key = f"{tgt.ticker}|{tgt.side}"
+        resting = self.state.data.setdefault("resting", [])
+        if any(f'{x["ticker"]}|{x["side"]}' == key for x in resting):
+            return self._skip(t, name, "limit order already resting on this market")
+        price = math.floor(min(fair_px + 0.02, ask - 0.01) * 100) / 100
+        while price >= 0.05 and expected_value(fair_px, price, stats, rate) < self.bank.get("min_ev", 0.0):
+            price = round(price - 0.01, 2)
+        if price < 0.05 or price > self.risk["max_entry_price"] or fair_px - price > 0.08:
+            return self._skip(t, name, "no fair limit price")
+        sc = score_bet(whale_px=fair_px, ask=price, whale_usd=whale_usd, stats=stats,
+                       same=same, opposite=opp, rate=rate)
+        held_usd = self.state.position(tgt.ticker, tgt.side) * price
+        budget, why = self._bankroll_budget(sc["score"], sc["ev"], held_usd)
+        if why:
+            return self._skip(t, name, f"limit: {why}")
+        count = math.floor(budget / price)
+        if count < 1:
+            return self._skip(t, name, "limit: risk limits leave no room")
+        start = self.pm.game_start(t.get("conditionId", "")) if t.get("conditionId") else None
+        start = start or self._kalshi_start(m)
+        before = lim.get("cancel_before_start_minutes", 5) * 60
+        expires = int(min(start - before, time.time() + lim.get("max_hours", 6) * 3600) if start
+                      else time.time() + lim.get("max_hours", 6) * 3600)
+        if expires <= time.time() + 60:
+            return self._skip(t, name, "limit: too close to game start")
+        if self.mode == "live":
+            try:
+                o = self.kalshi.create_order(tgt.ticker, tgt.side, "buy", count, price, None,
+                                             post_only=True, expiration_ts=expires)
+            except Exception as e:
+                log.error("  LIMIT ORDER FAILED: %s", e)
+                return self._skip(t, name, "limit order rejected")
+            oid = o.get("order_id")
+        else:
+            oid = f"paper-{uuid.uuid4()}"
+        resting.append({"id": oid, "ticker": tgt.ticker, "side": tgt.side, "price": price, "count": count,
+                        "remaining": count, "filled": 0, "fee_rate": rate, "whale": name,
+                        "title": t.get("title") or "", "outcome": t.get("outcome"), "score": sc["score"],
+                        "expires": expires, "placed": int(time.time()), "pm_price": fair_px})
+        log.info("  LIMIT %s BUY %d %s %s @ %.2f (ask %.2f, fair %.2f) score %d EV %+.1f%%, expires in %.0f min",
+                 self.mode.upper(), count, tgt.ticker, tgt.side.upper(), price, ask, fair_px, sc["score"],
+                 100 * sc["ev"], (expires - time.time()) / 60)
+
+    def check_resting(self) -> None:
+        """Record fills on resting orders; drop expired/cancelled ones."""
+        resting = self.state.data.get("resting", [])
+        keep = []
+        for r in resting:
+            new, done = 0, False
+            if self.mode == "live" and not str(r["id"]).startswith("paper-"):
+                try:
+                    o = self.kalshi.get_order(r["id"])
+                except Exception as e:
+                    log.warning("resting order check failed: %s", e)
+                    keep.append(r)
+                    continue
+                filled = int(float(o.get("fill_count_fp") or o.get("fill_count") or 0))
+                new = max(0, filled - r["filled"])
+                done = o.get("status") in ("canceled", "cancelled", "executed", "expired")
+                if not done and time.time() > r["expires"] + 120:
+                    try:
+                        self.kalshi.cancel_order(r["id"])
+                    except Exception:
+                        pass
+                    done = True
+            else:  # paper: fills when Kalshi's ask comes down to our price
+                try:
+                    m = self.kdata.market(r["ticker"])
+                    ask = _px(m, f'{r["side"]}_ask')
+                except Exception:
+                    ask = None
+                if ask is not None and ask <= r["price"] + 1e-9 and time.time() < r["expires"]:
+                    new = r["remaining"]
+                done = time.time() > r["expires"]
+            if new:
+                px = r["price"]
+                fee = kalshi_fee(new, px, r["fee_rate"])
+                self.state.add_position(r["ticker"], r["side"], new)
+                self.state.add_spent(new * px + fee)
+                self.state.open_lot(r["whale"], r["ticker"], r["side"], new, px, fee, r["title"])
+                self.state.data["lots"][-1]["score"] = r["score"]
+                self._journal(r["whale"], {"title": r["title"], "outcome": r["outcome"], "price": r["pm_price"]},
+                              Target(r["ticker"], r["side"]), "buy (limit)", new, px, score=r["score"])
+                log.info("LIMIT FILLED %d %s %s @ %.2f (%s)", new, r["ticker"], r["side"].upper(), px, r["whale"])
+                r["filled"] += new
+                r["remaining"] -= new
+            if r["remaining"] > 0 and not done:
+                keep.append(r)
+        self.state.data["resting"] = keep
+
+    def cancel_resting(self, ticker: str, side: str) -> None:
+        for r in [x for x in self.state.data.get("resting", []) if x["ticker"] == ticker and x["side"] == side]:
+            if self.mode == "live" and not str(r["id"]).startswith("paper-"):
+                try:
+                    self.kalshi.cancel_order(r["id"])
+                except Exception as e:
+                    log.warning("cancel failed: %s", e)
+            log.info("Cancelled resting order on %s %s (whale exited)", ticker, side.upper())
+        self.state.data["resting"] = [x for x in self.state.data.get("resting", [])
+                                      if not (x["ticker"] == ticker and x["side"] == side)]
 
     def _bankroll_budget(self, score: float, ev: float, held_usd: float) -> tuple[float, str | None]:
         """$ to stake from the bankroll for a bet with this score, or (0, reason to skip)."""
@@ -882,6 +1016,7 @@ class CopyBot:
                 self._journal(name, t, tgt, "buy", filled, px, score=p["score"])
 
     def _copy_sell(self, addr, name, t, tgt: Target, whale_px, sold) -> None:
+        self.cancel_resting(tgt.ticker, tgt.side)
         held = self.state.position(tgt.ticker, tgt.side)
         if held <= 0:
             return self._skip(t, name, "whale sold but we hold nothing")
@@ -981,9 +1116,9 @@ class CopyBot:
                     done[key] = time.time()  # started (or about to): never copy
                     continue
                 log.info("[%s] CATCH-UP open bet %s '%s' $%.0f now %.0fc", name, out, t["title"], value, 100 * cur)
-                before = len(self.state.data["lots"])
+                before = (len(self.state.data["lots"]), len(self.state.data.get("resting", [])))
                 self._copy_buy(name, whale, t, tgt, cur, value)
-                if len(self.state.data["lots"]) > before:
+                if (len(self.state.data["lots"]), len(self.state.data.get("resting", []))) != before:
                     done[key] = time.time()
 
     def check_settlements(self) -> None:
@@ -1040,6 +1175,8 @@ class CopyBot:
             "sizing": self.risk.get("sizing"),
             "kalshi_link": self.kalshi_link,
             "open_lots": len(self.state.data["lots"]),
+            "resting": [{k: r[k] for k in ("ticker", "side", "price", "remaining", "whale", "title", "score", "expires")}
+                        for r in self.state.data.get("resting", [])],
             "last_poll": self.last_poll,
             "last_error": self.last_error,
             "balance": self.balance,

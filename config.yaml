@@ -61,6 +61,15 @@ live_games:
   max_slippage: 0.0
   size_mult: 0.5
 
+# When buying at Kalshi's ask isn't worth it, rest a post-only limit order at a fair price
+# (maker fees are 0 on most Kalshi markets, at most 1/4 of the taker fee on NFL/NBA).
+limit_orders:
+  enabled: true
+  maker_fee_rate: 0.0175    # conservative: assume the max maker fee
+  max_hours: 6              # order lifetime if the start time is unknown
+  cancel_before_start_minutes: 5
+  check_seconds: 30
+
 # Bankroll mode (sizing: score). Paper mode tracks a virtual bankroll starting here.
 bankroll:
   start_usd: 98.49          # live: your deposit (used for the Return %)

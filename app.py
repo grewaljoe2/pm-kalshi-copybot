@@ -255,6 +255,11 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
 <td>{{ b.roi if b.roi is not none else '—' }}{% if b.roi is not none %}%{% endif %}</td><td>{{ b.open_lots }} (${{ '%.0f'|format(b.open_cost) }})</td></tr>{% endfor %}
 </table></div><div class="k" style="margin-top:6px">P&amp;L is after estimated Kalshi fees. Bets count once Kalshi settles the game or the whale exits.</div>
 {% else %}<div class="k">No copied bets yet.</div>{% endif %}</div>
+<div class="card"><h2>Waiting limit orders</h2>
+{% if st.resting %}<div class="scroll"><table><tr><th>Bet</th><th>Price</th><th>Qty</th><th>Score</th><th>Whale</th></tr>
+{% for r in st.resting %}<tr><td>{{ r.title }}<br><span class="k">{{ r.ticker }} {{ r.side|upper }}</span></td><td>{{ '%.0f'|format(100*r.price) }}¢</td><td>{{ r.remaining }}</td><td>{{ r.score }}</td><td>{{ r.whale }}</td></tr>{% endfor %}
+</table></div><div class="k" style="margin-top:6px">Resting at a fair price; fills only if someone sells at that price. Cancelled automatically before the game starts.</div>
+{% else %}<div class="k">None</div>{% endif %}</div>
 <div class="card"><h2>Open positions</h2>
 {% if st.positions %}<table>{% for k,v in st.positions.items() %}<tr><td>{{ k.split('|')[0] }}</td><td>{{ k.split('|')[1]|upper }}</td><td>{{ v }} contracts</td></tr>{% endfor %}</table>
 {% else %}<div class="k">None</div>{% endif %}</div>
@@ -449,7 +454,7 @@ def _slate_loop():
                     lines += sum(1 for m in ms if sm.parse_kalshi_date(m.get("event_ticker", "")) == today)
                 ev = BOT.state.data.get("events", [])
                 tday = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                copied = sum(1 for e in ev if e.get("time_utc", "").startswith(tday) and e.get("action") == "buy")
+                copied = sum(1 for e in ev if e.get("time_utc", "").startswith(tday) and str(e.get("action", "")).startswith("buy"))
                 skips = BOT.state.data.get("skips", {}).get(tday, {})
                 SLATE.clear()
                 SLATE.update({"date": str(today), "games": sum(per_league.values()),
