@@ -265,13 +265,17 @@ def _match_test(addr: str) -> None:
     if BOT is None:
         return
     try:
-        trades = whale_report._get(f"{whale_report.POLY}/trades", user=addr, limit=100)
+        trades = whale_report._get(f"{whale_report.POLY}/trades", user=addr, limit=300)
         reasons, found, examples = Counter(), 0, []
         seen = set()
+        from datetime import date, timedelta
         for t in trades:
             key = (t.get("slug"), t.get("outcome"))
             if key in seen:
                 continue
+            c = BOT.sports.classify(t)
+            if c and "date" in c and c["date"] < date.today() - timedelta(days=0):
+                continue  # finished games are closed on Kalshi; only test today and later
             seen.add(key)
             r, why = BOT.sports.lookup(t)
             if r:
@@ -331,45 +335,6 @@ Trades: ~{{ t.per_day }}/day · median ${{ '{:,.0f}'.format(t.median_usd or 0) }
 <td>${{ '{:,.0f}'.format(s.pnl_month or 0) }}</td><td>${{ '{:,.0f}'.format(s.pnl_all or 0) }}</td><td>{{ s.per_day }}</td>
 <td>${{ '{:,.0f}'.format(s.median_usd or 0) }}</td><td>{{ s.copyable_pct }}%</td></tr>{% endfor %}</table></div></div>
 </main></body></html>"""
-
-
-def _diag_lines():
-    """Temporary: sample Kalshi spread/total markets and Polymarket spread/total bets."""
-    import json
-    import whale_report
-    STOP.wait(15)
-    series = ["KXNBASPREAD", "KXNBATOTAL", "KXNFLSPREAD", "KXNFLTOTAL", "KXNHLSPREAD", "KXNHLTOTAL",
-              "KXNCAAFSPREAD", "KXNCAAFTOTAL", "KXUCLSPREAD", "KXUCLTOTAL", "KXEPLTOTAL", "KXCS2SPREAD",
-              "KXCS2TOTALMAPS", "KXLOLTOTALMAPS", "KXLOLSPREAD", "KXATPGAMETOTAL", "KXATPGAMESPREAD", "KXMLBTOTAL"]
-    keys = ("ticker", "event_ticker", "title", "yes_sub_title", "no_sub_title", "floor_strike",
-            "cap_strike", "strike_type", "custom_strike", "functional_strike")
-    for s in series:
-        try:
-            j = whale_report._get(f"{whale_report.KALSHI}/markets", series_ticker=s, status="open", limit=4)
-            for m in j.get("markets", [])[:3]:
-                d = {k: m.get(k) for k in keys}
-                d["rules"] = (m.get("rules_primary") or "")[:230]
-                log.info("KLINE %s", json.dumps(d, default=str))
-        except Exception as e:
-            log.warning("kline %s failed: %s", s, e)
-    wallets = ["0x7e3a1f95c558f39a51ff334d789e3e039b553246", "0x20d6436849f930584892730c7f96ebb2ac763856",
-               "0xf68a281980f8c13828e84e147e3822381d6e5b1b", "0xcdcccd0f2d86e450d973da415ad2430e5cc7935a",
-               "0x361b16e3ddfe1d415d41008daac2631d94ab74fe", "0xdaef2be2a19ad331737d06545f85615b094554e9",
-               "0x2005d16a84ceefa912d4e380cd32e7ff827875ea", "0x27f738fe203827445690339104aae35b20bc44b0"]
-    seen = set()
-    for w in wallets:
-        try:
-            for t in whale_report._get(f"{whale_report.POLY}/trades", user=w, limit=300):
-                slug = t.get("slug") or ""
-                if any(k in slug for k in ("spread", "total", "handicap")) and slug not in seen and len(seen) < 45:
-                    seen.add(slug)
-                    log.info("PMLINE %s", json.dumps({k: t.get(k) for k in ("title", "slug", "eventSlug", "outcome", "outcomeIndex", "price")}))
-            STOP.wait(1)
-        except Exception as e:
-            log.warning("pmline failed: %s", e)
-
-
-threading.Thread(target=_diag_lines, name="diag", daemon=True).start()
 
 
 if __name__ == "__main__":

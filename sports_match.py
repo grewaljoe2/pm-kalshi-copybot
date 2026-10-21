@@ -40,8 +40,20 @@ PREFIX_SERIES: dict[str, list[str]] = {
 }
 MAP_SERIES = {"cs2": "KXCS2MAP", "lol": "KXLOLMAP", "dota2": "KXDOTA2MAP", "val": "KXVALORANTMAP"}
 
-SKIP_WORDS = ("total", "spread", "handicap", "btts", "o/u", "over/under", "both teams", "exact",
-              "first", "1h", "2h", "half", "quarter", "corners", "kills", "props", "more-markets")
+# Full-game spreads and totals (Kalshi lists one market per line)
+_LEAGUE = {"nba": "NBA", "nfl": "NFL", "nhl": "NHL", "mlb": "MLB", "wnba": "WNBA", "cfb": "NCAAF",
+           "ncaaf": "NCAAF", "cbb": "NCAAMB", "ncaab": "NCAAMB", "epl": "EPL", "ucl": "UCL", "uel": "UEL",
+           "lal": "LALIGA", "laliga": "LALIGA", "sea": "SERIEA", "seriea": "SERIEA", "bun": "BUNDESLIGA",
+           "bundesliga": "BUNDESLIGA", "fl1": "LIGUE1", "ligue1": "LIGUE1", "mls": "MLS",
+           "cs2": "CS2", "lol": "LOL", "dota2": "DOTA2", "val": "VALORANT"}
+SPREAD_SERIES = {k: f"KX{v}SPREAD" for k, v in _LEAGUE.items()}
+TOTAL_SERIES = {k: f"KX{v}TOTAL" for k, v in _LEAGUE.items()}
+TOTAL_SERIES.update({"cs2": "KXCS2TOTALMAPS", "lol": "KXLOLTOTALMAPS", "dota2": "KXDOTA2TOTALMAPS",
+                     "val": "KXVALORANTTOTALMAPS"})
+
+# part-game / prop bets we never copy
+SKIP_WORDS = ("btts", "both teams", "exact", "first", "1h", "2h", "half", "quarter", "1st", "2nd",
+              "corners", "kills", "props", "team total", "team-total", "player", "inning", "period")
 STOP = {"fc", "cf", "sk", "afc", "sc", "ac", "club", "the", "cd", "ud", "rc", "sv", "fk", "bk",
         "if", "de", "of", "esports", "esport", "team", "gaming", "kv", "osc", "ssc", "as", "us"}
 MONTHS = {m: i for i, m in enumerate(
@@ -124,12 +136,35 @@ class SportsMatcher:
         if prefix not in PREFIX_SERIES:
             return {"skip": f"league '{prefix}' not set up"}
         low = title.lower()
-        rest = slug[len(ev):] if ev and slug.startswith(ev) else ""
+        base = re.sub(r"-more-markets$", "", ev) if ev else ""
+        if base and slug.startswith(base):
+            rest = slug[len(base):]
+        else:
+            rest = "-" + slug  # unknown layout: never treat as the main winner market
         mg = re.search(r"-game(\d+)$", slug)
         if mg and prefix in MAP_SERIES and "winner" in low:
             return {"prefix": prefix, "date": d, "kind": "map", "map": int(mg.group(1)), "codes": codes}
         if any(w in low or w in rest for w in SKIP_WORDS):
-            return {"skip": "bet type not copied (totals/spreads/props)"}
+            return {"skip": "bet type not copied (part-game / props)"}
+        mt = re.search(r"o/u\s*([\d.]+)", low)
+        if ("total" in rest or mt) and mt:
+            if prefix not in TOTAL_SERIES:
+                return {"skip": f"no Kalshi totals for '{prefix}'"}
+            return {"prefix": prefix, "date": d, "kind": "total", "line": float(mt.group(1)), "codes": codes}
+        body = title.split(":", 1)[1] if ":" in title else title
+        pairs = re.findall(r"([^()]+?)\s*\(([+-][\d.]+)\)", body)
+        neg = [(n.strip(" vs.").strip(), v) for n, v in pairs if v.startswith("-")]
+        ms = (neg[0][0], neg[0][1][1:]) if neg else None
+        if ms and ("spread" in rest or "handicap" in rest):
+            if prefix not in SPREAD_SERIES:
+                return {"skip": f"no Kalshi spreads for '{prefix}'"}
+            fav_code = None
+            if len(codes) >= 2:
+                fav_code = codes[0] if "-away-" in rest + "-" else (codes[1] if "-home-" in rest + "-" else None)
+            return {"prefix": prefix, "date": d, "kind": "spread", "line": float(ms[1]),
+                    "fav": re.sub(r"^vs\.?\s+", "", ms[0]), "fav_code": fav_code, "codes": codes}
+        if "total" in rest or "spread" in rest or "handicap" in rest:
+            return {"skip": "couldn't read the line"}
         mw = re.search(r"will (.+?) win on", low)
         if mw:
             team = title[mw.start(1):mw.end(1)]
@@ -138,7 +173,7 @@ class SportsMatcher:
                     "code": code, "codes": codes}
         if "draw" in low:
             return {"prefix": prefix, "date": d, "kind": "draw", "codes": codes}
-        if slug == ev or not rest:
+        if rest == "":
             return {"prefix": prefix, "date": d, "kind": "winner", "codes": codes}
         return {"skip": "bet type not copied"}
 
@@ -154,6 +189,10 @@ class SportsMatcher:
 
         if c["kind"] == "map":
             series = [MAP_SERIES[c["prefix"]]]
+        elif c["kind"] == "total":
+            series = [TOTAL_SERIES[c["prefix"]]]
+        elif c["kind"] == "spread":
+            series = [SPREAD_SERIES[c["prefix"]]]
         else:
             series = PREFIX_SERIES[c["prefix"]]
 
@@ -195,6 +234,9 @@ class SportsMatcher:
             evtail = m["event_ticker"].split("-")[1].lower() if "-" in m["event_ticker"] else ""
             return len(codes) >= 2 and all(cd in evtail for cd in codes[:2])
 
+        if c["kind"] in ("total", "spread"):
+            return self._line_lookup(c, t, by_event, teams, codes, outcome, event_has_codes)
+
         if c["kind"] == "draw":
             # find the game by the two teams, then its Tie market
             if not teams:
@@ -233,3 +275,76 @@ class SportsMatcher:
         if c["kind"] != "team_yesno" and not opponent_ok(best):
             return None, "found team but opponent didn't match"
         return {"ticker": best["ticker"], "side": side, "score": round(best_s, 2), "how": "name"}, None
+
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _strike(m: dict) -> float | None:
+        v = m.get("floor_strike")
+        try:
+            return float(v) if v not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    def _line_lookup(self, c, t, by_event, teams, codes, outcome, event_has_codes):
+        """Totals and spreads: same game, exact same line."""
+        # 1) find the game: team codes in the event ticker, else both team names in the rules
+        game = None
+        for ev, ms in by_event.items():
+            if event_has_codes(ms[0]):
+                game = ms
+                break
+        if game is None and teams:
+            for ev, ms in by_event.items():
+                rules = norm(ms[0].get("rules_primary") or "").replace(" ", "")
+                if all(norm(x).replace(" ", "")[:8] in rules for x in teams):
+                    game = ms
+                    break
+        line = c["line"]
+        if game is None and c["kind"] == "spread":
+            # fallback: the favourite's own "wins by over <line>" market on that date
+            for ms in by_event.values():
+                for m in ms:
+                    k = self._strike(m)
+                    team = re.split(r"\s+wins by", m.get("yes_sub_title") or "")[0]
+                    if k is not None and abs(k - line) < 1e-6 and name_sim(c["fav"], team) >= 0.85:
+                        game = ms
+                        break
+                if game:
+                    break
+        if game is None:
+            return None, "couldn't find the same game on Kalshi"
+        at_line = [m for m in game if (k := self._strike(m)) is not None and abs(k - line) < 1e-6]
+        if not at_line:
+            return None, f"Kalshi doesn't list the {line} line for this game"
+
+        if c["kind"] == "total":
+            o = outcome.lower()
+            if o not in ("over", "under"):
+                return None, f"unexpected total outcome '{outcome}'"
+            m = at_line[0]
+            return {"ticker": m["ticker"], "side": "yes" if o == "over" else "no", "how": "line"}, None
+
+        # spread: find the favourite's "wins by over <line>" market
+        def team_of(m):
+            return re.split(r"\s+wins by", m.get("yes_sub_title") or m.get("title") or "")[0]
+
+        def suffix_code(m):
+            mm = re.match(r"([A-Z]+)\d*$", m["ticker"].rsplit("-", 1)[-1])
+            return mm.group(1).lower() if mm else ""
+
+        fav = None
+        if c.get("fav_code"):
+            fav = next((m for m in at_line if suffix_code(m) == c["fav_code"].lower()), None)
+        if fav is None:
+            scored = sorted(((name_sim(c["fav"], team_of(m)), m) for m in at_line), key=lambda x: -x[0])
+            if scored and scored[0][0] >= 0.8:
+                fav = scored[0][1]
+        if fav is None:
+            return None, f"Kalshi doesn't list {c['fav']} -{line}"
+        if name_sim(outcome, c["fav"]) >= 0.8:
+            backs_fav = True
+        elif teams and any(name_sim(outcome, x) >= 0.8 for x in teams):
+            backs_fav = False
+        else:
+            backs_fav = t.get("outcomeIndex") == 0
+        return {"ticker": fav["ticker"], "side": "yes" if backs_fav else "no", "how": "line"}, None
