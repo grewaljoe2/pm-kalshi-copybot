@@ -494,11 +494,24 @@ class Kalshi:
             n = sum(float(f.get("count_fp") or f.get("count") or 0) for f in j.get("fills", []))
             return {"fill_count": n, "status": "unknown"}
 
-    def cancel_order(self, order_id: str) -> None:
-        try:
-            self._req("DELETE", f"/portfolio/events/orders/{order_id}")
-        except Exception:
-            self._req("DELETE", f"/portfolio/orders/{order_id}")
+    def cancel_order(self, order_id: str, ticker: str | None = None) -> None:
+        """Cancel a resting order. Tries the V2 forms; logs each failure so the right one is known."""
+        tries = [("DELETE", f"/portfolio/events/orders/{order_id}", {"params": {"ticker": ticker}} if ticker else {}),
+                 ("DELETE", f"/portfolio/events/orders/{order_id}", {}),
+                 ("POST", f"/portfolio/events/orders/{order_id}/cancel", {"json": {"ticker": ticker} if ticker else {}}),
+                 ("DELETE", "/portfolio/events/orders/batched",
+                  {"json": {"orders": [{"order_id": order_id, **({"ticker": ticker} if ticker else {})}]}}),
+                 ("DELETE", f"/portfolio/orders/{order_id}", {})]
+        errs = []
+        for method, path, kw in tries:
+            try:
+                self._req(method, path, **kw)
+                if errs:
+                    log.info("  cancel worked via %s %s (after: %s)", method, path, errs)
+                return
+            except Exception as e:
+                errs.append(str(e)[:160])
+        raise RuntimeError(" | ".join(errs))
 
     def collections(self) -> list[dict]:
         out, cursor = [], None
@@ -1107,7 +1120,7 @@ class CopyBot:
                 done = o.get("status") in ("canceled", "cancelled", "executed", "expired")
                 if not done and time.time() > r["expires"] + 120:
                     try:
-                        self.kalshi.cancel_order(r["id"])
+                        self.kalshi.cancel_order(r["id"], r.get("ticker"))
                     except Exception:
                         pass
                     done = True
@@ -1140,7 +1153,7 @@ class CopyBot:
         for r in [x for x in self.state.data.get("resting", []) if x["ticker"] == ticker and x["side"] == side]:
             if self.mode == "live" and not str(r["id"]).startswith("paper-"):
                 try:
-                    self.kalshi.cancel_order(r["id"])
+                    self.kalshi.cancel_order(r["id"], r.get("ticker"))
                 except Exception as e:
                     log.warning("cancel failed: %s", e)
             log.info("Cancelled resting order on %s %s (whale exited)", ticker, side.upper())
@@ -1489,15 +1502,15 @@ class CopyBot:
         cc = self.cfg.get("combos", {}) or {}
         if not cc.get("enabled", False) or self.paused or not self.kalshi.pkey:
             return
-        if not self.state.data.get("combo_reset_v7"):  # RFQ + edge sizing: redo today's combos
-            self.state.data["combo_reset_v7"] = True
+        if not self.state.data.get("combo_reset_v8"):  # RFQ + edge sizing: redo today's combos
+            self.state.data["combo_reset_v8"] = True
             self.state.data["combo_last_by"] = {}
             keep = []
             for r in self.state.data.get("resting", []):
                 if str(r.get("whale", "")).startswith("Combo") and not r.get("filled"):
                     try:
                         if self.mode == "live" and not str(r.get("id", "")).startswith("paper"):
-                            self.kalshi.cancel_order(r["id"])
+                            self.kalshi.cancel_order(r["id"], r.get("ticker"))
                         log.info("COMBO cancelled old waiting combo %s to re-price it", r.get("title"))
                         continue
                     except Exception as e:
@@ -1591,6 +1604,8 @@ class CopyBot:
                     ok = count >= 1 and self._place_combo(combo_tk, combo, hit, None, px, count, False)
                     if ok:
                         self._add_combo_spent(count * px)
+                    if q.get("error"):
+                        log.warning("COMBO quote request error: %s", q["error"])
                     row.update(action=f"LIMIT (quote {q['status']}{' ' + str(q.get('best')) if q.get('best') else ''})",
                                price=px, count=count, stake=round(count * px, 2), payout=count, placed=bool(ok))
             elif combo_tk:
