@@ -46,6 +46,13 @@ whales:
     address: "0x27f738fe203827445690339104aae35b20bc44b0"
     min_trade_usd: 150         # typical bet ~$420
 
+# Copy whales' bets that were already open before the bot saw them (pre-game only)
+catch_up:
+  enabled: true
+  every_seconds: 900
+  days_ahead: 3
+  min_minutes_before: 10     # never copy within 10 min of start or after the game started
+
 # Bankroll mode (sizing: score). Paper mode tracks a virtual bankroll starting here.
 bankroll:
   start_usd: 100

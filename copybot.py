@@ -24,7 +24,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
@@ -213,6 +213,35 @@ class Polymarket:
         r.raise_for_status()
         data = r.json()
         return data if isinstance(data, list) else data.get("data", [])
+
+    def open_positions(self, wallet: str) -> list[dict]:
+        r = self.s.get(f"{POLY_DATA}/positions", params={"user": wallet, "sizeThreshold": 1, "limit": 500},
+                       timeout=20)
+        r.raise_for_status()
+        d = r.json()
+        return d if isinstance(d, list) else d.get("data", [])
+
+    def game_start(self, condition_id: str) -> float | None:
+        """Game start (unix seconds) from Polymarket's market data, if it has one."""
+        try:
+            r = self.s.get("https://gamma-api.polymarket.com/markets",
+                           params={"condition_ids": condition_id}, timeout=15)
+            r.raise_for_status()
+            ms = r.json()
+            m = ms[0] if isinstance(ms, list) and ms else (ms if isinstance(ms, dict) else {})
+            ev = (m.get("events") or [{}])[0] if isinstance(m.get("events"), list) else {}
+            for v in (m.get("gameStartTime"), m.get("game_start_time"), ev.get("startTime"),
+                      ev.get("gameStartTime"), m.get("eventStartTime")):
+                if v:
+                    txt = str(v).replace(" ", "T").replace("Z", "+00:00")
+                    if len(txt) >= 22 and txt[-3] != ":" and txt[-5] in "+-":
+                        txt = txt[:-2] + ":" + txt[-2:]
+                    if re.search(r"[+-]\d\d$", txt):
+                        txt += ":00"
+                    return datetime.fromisoformat(txt).timestamp()
+        except Exception as e:
+            log.debug("gamma start lookup failed: %s", e)
+        return None
 
     def position_size(self, wallet: str, condition_id: str, outcome: str) -> float:
         r = self.s.get(f"{POLY_DATA}/positions",
@@ -446,6 +475,7 @@ class CopyBot:
         self.last_error: str | None = None
         self.balance: float | None = None
         self._last_settle_check = 0.0
+        self._last_catch_up = 0.0
         self.whale_stats: dict = self.state.data.get("whale_stats", {})  # wallet -> screener stats
         self.screen_buys: list = []  # recent buys of other top whales (from the screener)
         self.bank = cfg.get("bankroll", {}) or {}
@@ -507,6 +537,12 @@ class CopyBot:
                 self.process_board_queue()
             except Exception as e:
                 log.warning("board picks failed: %s", e)
+            if time.time() - self._last_catch_up > self.cfg.get("catch_up", {}).get("every_seconds", 900):
+                self._last_catch_up = time.time()
+                try:
+                    self.catch_up()
+                except Exception as e:
+                    log.warning("catch-up failed: %s", e)
             self.last_poll = time.time()
             if time.time() - self._last_settle_check > self.cfg.get("settle_check_seconds", 600):
                 self._last_settle_check = time.time()
@@ -778,6 +814,77 @@ class CopyBot:
             self.state.add_position(tgt.ticker, tgt.side, -filled)
             self.state.sell_lots(tgt.ticker, tgt.side, filled, px, kalshi_fee(filled, px, self.fee_rate))
             self._journal(name, t, tgt, "sell", filled, px)
+
+    @staticmethod
+    def _kalshi_start(m: dict) -> float | None:
+        """Start time from Kalshi rules text: '...originally scheduled for Oct 22, 2026 at 10:00 AM EDT'."""
+        mm = re.search(r"scheduled for ([A-Z][a-z]{2} \d{1,2}, \d{4}) at (\d{1,2}:\d{2} [AP]M) (EDT|EST)",
+                       m.get("rules_primary") or "")
+        if not mm:
+            return None
+        dt = datetime.strptime(f"{mm.group(1)} {mm.group(2)}", "%b %d, %Y %I:%M %p")
+        offset = 4 if mm.group(3) == "EDT" else 5
+        return dt.replace(tzinfo=timezone.utc).timestamp() + offset * 3600
+
+    def catch_up(self) -> None:
+        """Copy followed whales' open bets on games that haven't started yet (bets made before we watched)."""
+        cc = self.cfg.get("catch_up", {}) or {}
+        if not cc.get("enabled", True) or self.paused:
+            return
+        done = self.state.data.setdefault("catchup_done", {})
+        for k in [k for k, ts in done.items() if ts < time.time() - 4 * 86400]:
+            del done[k]
+        today = datetime.now(timezone.utc).date()
+        for addr, whale in self.whales.items():
+            name = whale.get("name", addr[:8])
+            try:
+                pos = self.pm.open_positions(addr)
+            except Exception as e:
+                log.warning("catch-up positions %s failed: %s", name, e)
+                continue
+            min_usd = whale.get("min_trade_usd", self.risk["min_whale_trade_usd"])
+            for p in pos:
+                cond, out = p.get("conditionId"), p.get("outcome")
+                key = f"{cond}|{out}"
+                cur = float(p.get("curPrice") or 0)
+                value = float(p.get("currentValue") or 0)
+                if key in done or value < min_usd or not 0.05 < cur < 0.95:
+                    continue
+                t = {"slug": p.get("slug"), "eventSlug": p.get("eventSlug"), "title": p.get("title"),
+                     "outcome": out, "outcomeIndex": p.get("outcomeIndex"), "conditionId": cond,
+                     "price": cur, "size": value / cur if cur else 0, "side": "BUY",
+                     "timestamp": int(time.time())}
+                c = self.sports.classify(t)
+                if not c or "skip" in c or c.get("date") is None:
+                    continue
+                if not (today - timedelta(days=1) <= c["date"] <= today + timedelta(days=cc.get("days_ahead", 3))):
+                    continue
+                tgt = self.maps.lookup(t)
+                if not tgt:
+                    found, _ = self.sports.lookup(t)
+                    if not found:
+                        continue
+                    tgt = Target(found["ticker"], found["side"])
+                if self.state.position(tgt.ticker, tgt.side) > 0:
+                    done[key] = time.time()
+                    continue
+                # make sure the game hasn't started
+                try:
+                    km = self.kdata.market(tgt.ticker)
+                except Exception:
+                    continue
+                start = self.pm.game_start(cond) or self._kalshi_start(km)
+                if start is None:
+                    if c["date"] <= today:
+                        continue  # same-day game with unknown start time: don't risk copying a live game
+                elif time.time() > start - cc.get("min_minutes_before", 10) * 60:
+                    done[key] = time.time()  # started (or about to): never copy
+                    continue
+                log.info("[%s] CATCH-UP open bet %s '%s' $%.0f now %.0fc", name, out, t["title"], value, 100 * cur)
+                before = len(self.state.data["lots"])
+                self._copy_buy(name, whale, t, tgt, cur, value)
+                if len(self.state.data["lots"]) > before:
+                    done[key] = time.time()
 
     def check_settlements(self) -> None:
         """Close out lots on Kalshi markets that have settled, so wins/losses are counted."""
