@@ -513,12 +513,94 @@ class Kalshi:
                 break
         return out
 
+    # ---- RFQ (request for quote): how combo markets actually trade ---------- #
+    def rfq_buy_yes(self, ticker: str, stake_usd: float, max_price: float, wait_s: float = 12) -> dict:
+        """Ask market makers to price YES on `ticker` for about stake_usd. Accept the best quote if
+        its YES price (1 - maker's no_bid) is <= max_price. Accepting the quote's NO side = we buy
+        YES. Returns {status: filled|no_quote|too_expensive|error, price, count, best}."""
+        need = stake_usd * 1.08 + 0.05
+        try:
+            self.ensure_shard_funds(ticker, need)
+        except Exception as e:
+            log.warning("  shard funding for RFQ %s failed: %s", ticker, e)
+        rfq = self._req("POST", "/communications/rfqs", json={
+            "market_ticker": ticker, "rest_remainder": False,
+            "target_cost_dollars": f"{stake_usd:.2f}", "target_cost_excludes_fees": False})
+        rid = rfq.get("id")
+        out = {"status": "no_quote", "price": None, "count": 0, "best": None, "rfq": rid}
+        try:
+            deadline, best = time.time() + wait_s, None
+            while time.time() < deadline:
+                time.sleep(2.0)
+                qs = self._req("GET", "/communications/quotes", params={"rfq_id": rid, "limit": 100}).get("quotes") or []
+                for q in qs:
+                    if q.get("status") not in (None, "open"):
+                        continue
+                    nb = float(q.get("no_bid_dollars") or 0)
+                    if nb <= 0:
+                        continue
+                    yes_px = round(1 - nb, 4)
+                    if best is None or yes_px < best[0]:
+                        best = (yes_px, q)
+                if best and best[0] <= max_price:
+                    break
+            if not best:
+                return out
+            out["best"] = best[0]
+            if best[0] > max_price:
+                out["status"] = "too_expensive"
+                return out
+            q = best[1]
+            self._req("PUT", f"/communications/rfqs/{rid}/quotes/{q['id']}/accept", json={"accepted_side": "no"})
+            # maker has ~3s to confirm, then ~1s to execute (combo markets are HVM)
+            for _ in range(8):
+                time.sleep(1.5)
+                st = self._req("GET", "/communications/quotes", params={"rfq_id": rid, "limit": 100}).get("quotes") or []
+                me = next((x for x in st if x.get("id") == q["id"]), {})
+                if me.get("status") == "executed":
+                    break
+                if me.get("status") == "cancelled":
+                    out["status"] = "maker_cancelled"
+                    return out
+            fills = self._req("GET", "/portfolio/fills", params={"ticker": ticker, "limit": 50}).get("fills") or []
+            fills = [f for f in fills if (f.get("side") == "yes" and f.get("action") == "buy")
+                     and int(time.time()) - _ts(f.get("created_time")) < 300]
+            n = sum(float(f.get("count_fp") or f.get("count") or 0) for f in fills)
+            if n > 0:
+                cost = sum(float(f.get("count_fp") or f.get("count") or 0) *
+                           float(f.get("yes_price_dollars") or (float(f.get("yes_price") or 0) / 100)) for f in fills)
+                out.update(status="filled", count=n, price=round(cost / n, 4))
+            else:
+                out["status"] = "accepted_no_fill_yet"
+            return out
+        except Exception as e:
+            out.update(status="error", error=str(e)[:200])
+            return out
+        finally:
+            try:
+                self._req("DELETE", f"/communications/rfqs/{rid}")
+            except Exception:
+                pass
+
     def create_combo(self, collection_ticker: str, legs: list[dict]) -> dict:
         """legs: [{event_ticker, market_ticker, side}] -> {market_ticker, event_ticker} of the combo."""
         return self._req("POST", f"/multivariate_event_collections/{collection_ticker}",
                          json={"selected_markets": legs})
 
 
+
+
+def _ts(v) -> int:
+    """ISO time or epoch -> epoch seconds (0 if unknown)."""
+    if v in (None, ""):
+        return 0
+    try:
+        return int(float(v))
+    except (TypeError, ValueError):
+        try:
+            return int(datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp())
+        except ValueError:
+            return 0
 
 
 def kalshi_fee(count: int, price: float, rate: float = 0.07) -> float:
@@ -1277,45 +1359,78 @@ class CopyBot:
             legs.append({"event_ticker": ev, "market_ticker": p["ticker"], "side": "yes",
                          "fair": float(p.get("p") or p["whale_px"]), "ask": p["ask"], "score": p["score"],
                          "game": ev.split("-", 1)[1] if "-" in ev else ev, "start": p.get("start"),
-                         "player": p.get("player"),
+                         "player": p.get("player"), "hist": p.get("hist"), "p_hist": p.get("p_hist"),
                          "title": p["outcome"] if p.get("kind") == "prop" else f'{p["title"]} — {p["outcome"]}'})
         return sorted(legs, key=lambda l: (-l["fair"], -l["score"]))
 
+    @staticmethod
+    def _pair_factor(a: dict, b: dict) -> float | None:
+        """How two legs from the same game move together, from games both players played:
+        joint hit rate / (rate A x rate B). >1 = they tend to hit together. None = not enough
+        shared games to tell. Pulled halfway to 1 to stay conservative."""
+        ha = {e: h for e, h in (a.get("hist") or []) if e}
+        hb = {e: h for e, h in (b.get("hist") or []) if e}
+        shared = [e for e in ha if e in hb]
+        if len(shared) < 6:
+            return None
+        n = len(shared)
+        both = sum(1 for e in shared if ha[e] and hb[e])
+        pa = (sum(ha[e] for e in shared) + 1) / (n + 2)
+        pb = (sum(hb[e] for e in shared) + 1) / (n + 2)
+        pj = (both + pa * pb * 2) / (n + 2)
+        f = max(0.80, min(1.25, pj / (pa * pb)))
+        return 1 + 0.5 * (f - 1)
+
+    def _combo_fair(self, legs: list[dict]) -> float:
+        p = math.prod(l["fair"] for l in legs)
+        for i, a in enumerate(legs):
+            for b in legs[i + 1:]:
+                if a["game"] == b["game"]:
+                    p *= self._pair_factor(a, b) or 0.97
+        return min(p, min(l["fair"] for l in legs))
+
+    def _can_join(self, leg: dict, take: list[dict], cc: dict) -> bool:
+        """Same game (or same player) is fine when the history shows the legs hit together
+        (or are unrelated); never when they work against each other or there's no shared data."""
+        same = [x for x in take if x["game"] == leg["game"]]
+        if not same:
+            return True
+        if not cc.get("same_game", True) or len(same) >= int(cc.get("max_per_game", 3)):
+            return False
+        floor = float(cc.get("min_pair_factor", 1.0))
+        return all((self._pair_factor(leg, x) or 0) >= floor for x in same)
+
     def _plan_slate(self, legs: list[dict], cc: dict, sizes: list[int]) -> list[list[dict]]:
-        """Put every leg into a combo, each leg used once. Inside one combo: one leg per game and
-        per player (legs from the same game move together). Strongest legs go into the small
-        combos; 5-6 leg combos only use elite legs; the size list repeats until all legs are used.
-        A combo below the hit-chance floor is shrunk until it clears it."""
+        """Put every leg into a combo, each leg used once. Legs from the same game (or the same
+        player) only share a combo when their game logs show they hit together. Strongest legs go
+        into the small combos; 5-6 leg combos only use elite legs; the size list repeats until
+        all legs are used. A combo below the hit-chance floor is shrunk until it clears it."""
         min_hit = float(cc.get("min_hit_chance", 0.30))
         elite = float(cc.get("elite_leg_chance", 0.84))
         left, out, i, stalls = list(legs), [], 0, 0
         while len(left) >= 2 and stalls < len(sizes):
             n = sizes[i % len(sizes)]
             i += 1
-            take, games, players = [], set(), set()
+            take = []
             for l in left:
                 if len(take) >= n:
                     break
-                if (n >= 5 and l["fair"] < elite) or l["game"] in games or (l.get("player") and l["player"] in players):
+                if n >= 5 and l["fair"] < elite:
                     continue
-                take.append(l)
-                games.add(l["game"])
-                if l.get("player"):
-                    players.add(l["player"])
-            while len(take) > 2 and math.prod(l["fair"] for l in take) < min_hit:
+                if self._can_join(l, take, cc):
+                    take.append(l)
+            while len(take) > 2 and self._combo_fair(take) < min_hit:
                 take.pop()
-            if len(take) < 2 or math.prod(l["fair"] for l in take) < min_hit:
+            if len(take) < 2 or self._combo_fair(take) < min_hit:
                 stalls += 1
                 continue
             stalls = 0
             out.append(take)
             ids = {id(l) for l in take}
             left = [l for l in left if id(l) not in ids]
-        # a single leftover leg joins the last combo it fits in (different game, still >= floor)
-        for l in left:
+        for l in left:  # leftover legs join a combo they fit in
             for c in reversed(out):
-                if l["game"] not in {x["game"] for x in c} and len(c) < max(sizes) and \
-                        math.prod(x["fair"] for x in c) * l["fair"] >= min_hit:
+                if len(c) < max(sizes) and self._can_join(l, c, cc) and self._combo_fair(c + [l]) >= min_hit:
                     c.append(l)
                     break
         return out
@@ -1356,18 +1471,40 @@ class CopyBot:
         t = ticker.upper()
         return "NBA" if t.startswith("KXNBA") else ("NFL" if t.startswith("KXNFL") else "OTHER")
 
+    def _combo_spent_today(self) -> float:
+        d = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return float((self.state.data.get("combo_spent_by_day") or {}).get(d, 0.0))
+
+    def _add_combo_spent(self, usd: float) -> None:
+        d = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        m = self.state.data.setdefault("combo_spent_by_day", {})
+        m[d] = round(float(m.get(d, 0.0)) + usd, 2)
+        for k in sorted(m)[:-10]:
+            m.pop(k, None)
+
     def weekly_combo(self, picks: list[dict]) -> None:
         """Combo slates per league: NBA daily (tonight's games), NFL for the upcoming games,
-        other whale picks on their own. Strong legs (whale picks + player props), one per game,
-        are split into several combos; 5-6 legs only from elite legs."""
+        other whale picks on their own. Every strong leg goes into a combo; each combo is
+        priced by Kalshi market makers (RFQ) and bought only at or below our fair price."""
         cc = self.cfg.get("combos", {}) or {}
         if not cc.get("enabled", False) or self.paused or not self.kalshi.pkey:
             return
-        if not self.state.data.get("combo_reset_v6"):  # new all-legs planner: rebuild now
-            self.state.data["combo_reset_v6"] = True
+        if not self.state.data.get("combo_reset_v7"):  # RFQ + edge sizing: redo today's combos
+            self.state.data["combo_reset_v7"] = True
             self.state.data["combo_last_by"] = {}
+            keep = []
+            for r in self.state.data.get("resting", []):
+                if str(r.get("whale", "")).startswith("Combo") and not r.get("filled"):
+                    try:
+                        if self.mode == "live" and not str(r.get("id", "")).startswith("paper"):
+                            self.kalshi.cancel_order(r["id"])
+                        log.info("COMBO cancelled old waiting combo %s to re-price it", r.get("title"))
+                        continue
+                    except Exception as e:
+                        log.warning("combo cancel failed: %s", e)
+                keep.append(r)
+            self.state.data["resting"] = keep
         legs = self._combo_pool(picks, cc)
-        # legs already inside an open or waiting combo are never bet again
         in_play = " | ".join(str(x.get("title", "")) for x in
                              self.state.data.get("resting", []) + self.state.data.get("lots", [])
                              if str(x.get("whale", "")).startswith("Combo"))
@@ -1391,7 +1528,7 @@ class CopyBot:
                 if lg_legs:
                     log.info("COMBO %s: %d strong legs, not enough for a combo yet", lg, len(lg_legs))
                 continue
-            rows = self._run_slate(lg, plan, cc, float(lc.get("budget_pct", 0.04)))
+            rows = self._run_slate(lg, plan, cc)
             for combo, row in zip(plan, rows):
                 if row.get("placed"):
                     for l in combo:
@@ -1403,46 +1540,73 @@ class CopyBot:
         self.combo_slate = {"slates": slates, "dry_run": cc.get("dry_run", True),
                             "combos": [r | {"league": s["league"]} for s in slates for r in s["combos"]]}
 
-    def _run_slate(self, lg: str, plan: list[list[dict]], cc: dict, budget_pct: float) -> list[dict]:
+    def _combo_stake(self, hit: float, price: float, cc: dict) -> float:
+        """Half-Kelly on the edge, capped per combo and by what's left of today's combo budget."""
+        if price <= 0 or price >= 1 or hit <= price:
+            return 0.0
+        eq = self.equity()
+        kelly = (hit - price) / (1 - price)
+        stake = eq * kelly * float(cc.get("kelly_fraction", 0.5))
+        stake = min(stake, eq * float(cc.get("max_combo_pct", 0.10)))
+        left = eq * float(cc.get("daily_budget_pct", 0.45)) - self._combo_spent_today()
+        stake = min(stake, left, max(0.0, self.cash() - 0.5))
+        return round(stake, 2) if stake >= float(cc.get("min_stake_usd", 1.0)) else 0.0
+
+    def _run_slate(self, lg: str, plan: list[list[dict]], cc: dict) -> list[dict]:
         from scoring import fee_per_contract
-        budget = self.equity() * budget_pct
-        hits = [math.prod(l["fair"] for l in c) for c in plan]
         dry = cc.get("dry_run", True)
+        min_edge = float(cc.get("min_edge", 0.03))
         rows = []
-        for combo, hit in zip(plan, hits):
-            stake = max(float(cc.get("min_stake_usd", 1.0)), budget * hit / sum(hits))
+        for combo in sorted(plan, key=lambda c: -self._combo_fair(c)):
+            hit = self._combo_fair(combo)
+            max_px = round(hit - min_edge - fee_per_contract(hit, self.fee_rate), 4)  # most we'll pay
             combo_tk, cm, errs = self._build_combo(combo)
-            ask = _px(cm, "yes_ask") if cm else None
-            price = math.floor(hit * 100) / 100
-            take = ask is not None and 0 < ask <= hit - fee_per_contract(ask, self.fee_rate)
-            px = ask if take else price
-            count = math.floor(stake / px) if px and px > 0 else 0
             row = {"legs": [l["title"] for l in combo], "size": len(combo), "hit": round(hit, 3),
-                   "ticker": combo_tk, "ask": ask, "price": px, "count": count,
-                   "stake": round(count * (px or 0), 2), "payout": count,
-                   "action": ("TAKE" if take else "LIMIT") if combo_tk else "not offered",
-                   "note": "; ".join(errs[-1:]) if (not combo_tk or not cm) else "", "placed": False}
-            log.info("COMBO %s %d-leg hit %.0f%% %s -> %s %d @ %s (stake $%.2f, pays $%d, Kalshi ask %s)%s %s",
-                     lg, len(combo), 100 * hit, row["legs"], row["action"], count, px, row["stake"], count,
-                     ask, "  [dry run]" if dry else "", row["note"])
-            if not dry and count >= 1 and combo_tk:
-                row["placed"] = self._place_combo(combo_tk, combo, hit, ask, price, count, take)
+                   "ticker": combo_tk, "max_price": max_px, "price": None, "count": 0, "stake": 0.0,
+                   "payout": 0, "action": "not offered" if not combo_tk else "", "placed": False,
+                   "same_game": len({l["game"] for l in combo}) < len(combo),
+                   "note": "; ".join(errs[-1:]) if not combo_tk else ""}
+            stake = self._combo_stake(hit, max_px, cc)
+            if combo_tk and stake <= 0:
+                row["action"] = "skip (budget/edge)"
+            elif combo_tk and not dry and self.mode == "live":
+                q = self.kalshi.rfq_buy_yes(combo_tk, stake, max_px)
+                row["quote"] = q.get("best")
+                if q["status"] == "filled":
+                    n, px = int(q["count"]), float(q["price"])
+                    fee = kalshi_fee(n, px, self.fee_rate)
+                    title = " + ".join(row["legs"])
+                    name = f"Combo {len(combo)}-leg"
+                    self.state.add_position(combo_tk, "yes", n)
+                    self.state.add_spent(n * px + fee)
+                    self._add_combo_spent(n * px + fee)
+                    self.state.open_lot(name, combo_tk, "yes", n, px, fee, title)
+                    self._journal(name, {"title": title, "outcome": "combo", "price": hit},
+                                  Target(combo_tk, "yes"), "buy", n, px)
+                    row.update(action="BOUGHT (quote)", price=px, count=n, stake=round(n * px, 2), payout=n, placed=True)
+                else:
+                    # no maker quote at our price: wait with a limit order a bit under fair
+                    px = math.floor(max_px * 100) / 100
+                    count = math.floor(stake / px) if px > 0 else 0
+                    ok = count >= 1 and self._place_combo(combo_tk, combo, hit, None, px, count, False)
+                    if ok:
+                        self._add_combo_spent(count * px)
+                    row.update(action=f"LIMIT (quote {q['status']}{' ' + str(q.get('best')) if q.get('best') else ''})",
+                               price=px, count=count, stake=round(count * px, 2), payout=count, placed=bool(ok))
+            elif combo_tk:
+                px = max_px
+                count = math.floor(stake / px) if px > 0 else 0
+                row.update(action="(test) would request quote", price=px, count=count, stake=round(count * px, 2), payout=count)
+            log.info("COMBO %s %d-leg%s hit %.0f%% max %s %s -> %s %s x%d (stake $%.2f, pays $%d) %s",
+                     lg, len(combo), " same-game" if row["same_game"] else "", 100 * hit, max_px, row["legs"],
+                     row["action"], row["price"], row["count"], row["stake"], row["payout"], row["note"])
             rows.append(row)
         return rows
 
-    def _place_combo(self, combo_tk, legs, fair, ask, price, count, take) -> None:
+    def _place_combo(self, combo_tk, legs, fair, ask, price, count, take) -> bool:
         tgt = Target(combo_tk, "yes")
         name = f"Combo {len(legs)}-leg"
         title = " + ".join(l["title"] for l in legs)
-        if take:
-            filled, cost = self._execute(tgt, "buy", count, ask)
-            if filled:
-                fee = kalshi_fee(filled, cost / filled, self.fee_rate)
-                self.state.add_position(combo_tk, "yes", filled)
-                self.state.add_spent(cost + fee)
-                self.state.open_lot(name, combo_tk, "yes", filled, cost / filled, fee, title)
-                self._journal(name, {"title": title, "outcome": "combo", "price": fair}, tgt, "buy", filled, cost / filled)
-            return bool(filled)
         starts = [x for x in (l.get("start") for l in legs) if x]
         expires = int(min(min(starts) - 300 if starts else time.time() + 86400, time.time() + 86400))
         if expires <= time.time() + 300:

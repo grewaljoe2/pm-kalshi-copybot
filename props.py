@@ -164,7 +164,7 @@ class PropModel:
                         if not eid or eid in rows:
                             continue
                         meta = evmeta.get(eid) or {}
-                        rows[eid] = {"date": meta.get("gameDate") or "",
+                        rows[eid] = {"eid": eid, "date": meta.get("gameDate") or "",
                                      "stats": dict(zip(names, ev.get("stats") or []))}
         out = sorted(rows.values(), key=lambda r: r["date"], reverse=True)
         self._logs[key] = (time.time(), out)
@@ -182,7 +182,9 @@ class PropModel:
         return tot
 
     def hit_rate(self, league: str, rows: list[dict], fields: list[str], line: float) -> dict | None:
-        vals = [v for v in (self.stat_value(r, fields) for r in rows[:SAMPLE[league]]) if v is not None]
+        pairs = [(r.get("eid"), self.stat_value(r, fields)) for r in rows[:SAMPLE[league]]]
+        pairs = [(e, v) for e, v in pairs if v is not None]
+        vals = [v for _, v in pairs]
         if len(vals) < 6:
             return None
         w = [DECAY ** i for i in range(len(vals))]
@@ -191,7 +193,7 @@ class PropModel:
         last10 = vals[:10]
         return {"p_hist": p, "n": len(vals), "avg": sum(last10) / len(last10),
                 "last10_hits": sum(1 for v in last10 if v > line), "last10_n": len(last10),
-                "recent": vals[:5]}
+                "recent": vals[:5], "hist": [[e, 1 if v > line else 0] for e, v in pairs]}
 
     # ESPN abbreviations that differ from Kalshi's
     ALIAS = {"GS": "GSW", "NY": "NYK", "SA": "SAS", "NO": "NOP", "UTAH": "UTA", "WSH": "WAS",
@@ -322,7 +324,7 @@ class PropModel:
                     "ask": ask, "bid": bid, "p": round(p, 3), "p_hist": round(hr["p_hist"], 3),
                     "whale_px": round(p, 3), "ev": round(ev, 4), "edge": round(edge, 3), "score": score,
                     "n": hr["n"], "avg": round(hr["avg"], 1), "last10": f'{hr["last10_hits"]}/{hr["last10_n"]}',
-                    "recent": hr["recent"], "start": start, "status": "pre",
+                    "recent": hr["recent"], "hist": hr["hist"], "start": start, "status": "pre",
                 })
                 time.sleep(0.05)
         # one line per player+stat: keep the best-rated line

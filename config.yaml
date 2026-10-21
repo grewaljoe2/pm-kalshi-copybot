@@ -81,22 +81,28 @@ combos:
   min_hit_chance: 0.30      # never build a combo less likely than 30% to hit
   elite_leg_chance: 0.84    # legs allowed in 5-6 leg combos
   min_stake_usd: 1.0
+  # sizing: half-Kelly on the edge (our hit chance vs the price we pay)
+  kelly_fraction: 0.5
+  max_combo_pct: 0.10       # at most 10% of balance in one combo
+  daily_budget_pct: 0.45    # at most 45% of balance in combos per day (55% stays for whale copies)
+  min_edge: 0.03            # only buy a combo at least 3c under our fair price (after fee)
+  # same-game legs: allowed when their game logs show they hit together
+  same_game: true
+  max_per_game: 3
+  min_pair_factor: 1.0      # 1.0 = unrelated or positively linked; below 1 = they hurt each other
   leagues:
     NBA:                    # daily: tonight's games
       every_hours: 20
       max_hours_ahead: 30
       sizes: [2, 3, 4, 6]
-      budget_pct: 0.08      # 8% of balance per day across NBA combos
     NFL:                    # upcoming games (this week), rebuilt daily with games not used yet
       every_hours: 20
       max_hours_ahead: 120
       sizes: [2, 3, 4, 6]
-      budget_pct: 0.08
     OTHER:                  # whale picks from other leagues (college football etc.)
       every_hours: 20
       max_hours_ahead: 48
       sizes: [2, 3]
-      budget_pct: 0.02
 
 # Bankroll mode (sizing: score). Paper mode tracks a virtual bankroll starting here.
 bankroll:
