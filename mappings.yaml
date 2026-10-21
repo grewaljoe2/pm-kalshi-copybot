@@ -1,0 +1,20 @@
+# Polymarket market + outcome  ->  Kalshi ticker + side
+#
+# Only mapped markets get copied. Use find_matches.py to get candidates,
+# then CHECK that both markets resolve on the same event, date and rules.
+#
+# Identify the Polymarket market by condition_id (preferred) or slug.
+# Outcome names must match Polymarket's exactly ("Yes"/"No", or team names).
+
+mappings:
+  # Example (placeholder values - replace with real ones):
+  - polymarket: {condition_id: "0xREPLACE_ME"}   # Fed cuts rates in December?
+    outcomes:
+      "Yes": {ticker: "KXFEDDECISION-REPLACE-ME", side: "yes"}
+      "No":  {ticker: "KXFEDDECISION-REPLACE-ME", side: "no"}
+
+  # Multi-outcome example: one Polymarket market per team, one Kalshi ticker per team
+  # - polymarket: {slug: "will-team-a-win-the-championship"}
+  #   outcomes:
+  #     "Yes": {ticker: "KXCHAMP-26-TEAMA", side: "yes"}
+  #     "No":  {ticker: "KXCHAMP-26-TEAMA", side: "no"}

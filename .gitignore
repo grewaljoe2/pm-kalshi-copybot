@@ -1,0 +1,11 @@
+# runtime data
+state.json
+state.tmp
+journal.csv
+# secrets - never commit your Kalshi key
+*.pem
+.env
+# python
+__pycache__/
+*.pyc
+.venv/

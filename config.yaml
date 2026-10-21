@@ -1,0 +1,40 @@
+# ---------------------------------------------------------------
+# Polymarket -> Kalshi copy bot config
+# ---------------------------------------------------------------
+
+# "paper" = log what it would do, no orders.  "live" = real orders.
+mode: paper
+
+poll_seconds: 15
+mappings_file: mappings.yaml
+state_file: state.json
+journal_file: journal.csv
+
+kalshi:
+  env: demo                 # "demo" (fake money) or "prod"
+  # Prefer env vars KALSHI_KEY_ID / KALSHI_KEY_PATH over putting these here
+  key_id: ""
+  private_key_path: "~/.kalshi/private_key.pem"
+
+# Polymarket wallets to follow (use the proxy wallet shown on their profile)
+whales:
+  - name: whale1
+    address: "0x0000000000000000000000000000000000000000"
+    min_trade_usd: 2000     # only copy their trades of at least this size
+    copy_ratio: 0.01        # used when sizing = proportional
+  # - name: whale2
+  #   address: "0x..."
+
+risk:
+  sizing: fixed             # "fixed" or "proportional"
+  fixed_usd: 25             # $ per copied trade when sizing = fixed
+  copy_ratio: 0.01          # default ratio when sizing = proportional
+  min_whale_trade_usd: 1000
+  max_usd_per_trade: 50
+  max_usd_per_market: 150
+  max_usd_per_day: 300
+  max_slippage: 0.03        # won't pay more than whale price + 3c
+  max_entry_price: 0.92     # skip near-certain markets (little upside)
+  max_trade_age_seconds: 300
+  always_follow_exits: true # sell when whale sells, even below their price
+  time_in_force: fill_or_kill

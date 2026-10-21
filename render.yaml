@@ -1,0 +1,31 @@
+# Render Blueprint: one web service = bot + dashboard, with a disk so
+# positions/trade history survive restarts and redeploys.
+services:
+  - type: web
+    name: pm-kalshi-copybot
+    runtime: python
+    plan: starter            # smallest paid plan; needed for the always-on bot + disk
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 60 --bind 0.0.0.0:$PORT
+    healthCheckPath: /healthz
+    autoDeploy: true         # redeploys when you push to GitHub
+    disk:
+      name: copybot-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: DATA_DIR
+        value: /var/data
+      - key: BOT_MODE          # paper | live
+        value: paper
+      - key: KALSHI_ENV        # demo | prod
+        value: demo
+      - key: DASHBOARD_PASSWORD
+        generateValue: true    # see it under Environment in the Render dashboard
+      - key: KALSHI_KEY_ID     # fill in on Render when you're ready for live
+        sync: false
+      # Kalshi private key: add it in Render as a Secret File named kalshi.pem
+      - key: KALSHI_KEY_PATH
+        value: /etc/secrets/kalshi.pem
