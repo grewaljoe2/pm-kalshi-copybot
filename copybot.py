@@ -1546,12 +1546,22 @@ class CopyBot:
             self.state.data.pop("combo_legs_used", None)
         last_by = self.state.data.setdefault("combo_last_by", {})
         leagues = cc.get("leagues") or {}
+        self._borrow_ok, why = self._whale_prices_bad(picks or getattr(self, "_last_whale_picks", []), cc)
+        if picks:
+            self._last_whale_picks = picks
+        if self._borrow_ok != getattr(self, "_last_borrow_log", None):
+            self._last_borrow_log = self._borrow_ok
+            log.info("COMBO borrow whale share: %s (%s)", "ON" if self._borrow_ok else "off", why)
+        self.combo_borrow = {"on": self._borrow_ok, "why": why}
         slates = list(self.combo_slate.get("slates", [])) if isinstance(self.combo_slate, dict) else []
         for lg in ("NBA", "NFL", "OTHER"):
             lc = leagues.get(lg, {}) or {}
             if not lc.get("enabled", True):
                 continue
-            if time.time() - float(last_by.get(lg, 0) or 0) < float(lc.get("every_hours", 24)) * 3600:
+            every = float(lc.get("every_hours", 24))
+            if self._borrow_ok:  # idle whale cash: look for more parlays every few hours
+                every = min(every, float((cc.get("borrow", {}) or {}).get("rebuild_hours", 3)))
+            if time.time() - float(last_by.get(lg, 0) or 0) < every * 3600:
                 continue
             lg_legs = [l for l in legs if self._combo_league(l["market_ticker"]) == lg and l["market_ticker"] not in used
                        and (not l.get("start") or l["start"] < time.time() + float(lc.get("max_hours_ahead", 30)) * 3600)]
@@ -1574,6 +1584,7 @@ class CopyBot:
         except Exception as e:
             log.warning("combo reconcile failed: %s", e)
         self.combo_slate = {"slates": slates, "dry_run": cc.get("dry_run", True),
+                            "borrow": getattr(self, "combo_borrow", {}),
                             "combos": [r | {"league": s["league"]} for s in slates for r in s["combos"]]}
 
     def reconcile_combos(self) -> None:
@@ -1621,6 +1632,29 @@ class CopyBot:
                 log.info("COMBO reconciled %d contracts of %s @ %.3f bought through a quote", missing, tk, px)
         self.state.save()
 
+    def _whale_prices_bad(self, picks: list[dict], cc: dict) -> tuple[bool, str]:
+        """True when today's whale bets mostly can't be copied at a good price on Kalshi, and no
+        good whale bet is waiting - then parlays may use the whale share's idle cash."""
+        bc = cc.get("borrow", {}) or {}
+        if not bc.get("enabled", True):
+            return False, "off"
+        today = _today()
+        skips = (self.state.data.get("skips") or {}).get(today, {})
+        bad_words = ("expected value", "slippage", "price", "stale", "fee")
+        bad = sum(n for k, n in skips.items() if any(w in k.lower() for w in bad_words))
+        copied = sum(1 for e in self.state.data.get("events", [])
+                     if e.get("time_utc", "").startswith(today) and str(e.get("action", "")).startswith("buy")
+                     and not str(e.get("whale", "")).startswith("Combo"))
+        board_min = float(((self.bank.get("board") or {}).get("min_score")) or 70)
+        pending = sum(1 for p in picks if p.get("kind") != "prop" and p.get("status") == "pre"
+                      and p.get("ev", 0) > 0 and p.get("score", 0) >= board_min
+                      and self.state.position(p.get("ticker", ""), p.get("side", "yes")) <= 0)
+        share = copied / max(1, copied + bad)
+        ok = (bad >= int(bc.get("min_bad_price_skips", 5)) and share <= float(bc.get("max_copy_share", 0.35))
+              and pending == 0)
+        why = f"whale bets today: {copied} copied, {bad} bad prices, {pending} good waiting"
+        return ok, why
+
     def _combo_stake(self, hit: float, price: float, cc: dict) -> float:
         """Half-Kelly on the edge, capped per combo and by what's left of today's combo budget."""
         if price <= 0 or price >= 1 or hit <= price:
@@ -1630,6 +1664,9 @@ class CopyBot:
         stake = eq * kelly * float(cc.get("kelly_fraction", 0.5))
         stake = min(stake, eq * float(cc.get("max_combo_pct", 0.10)))
         left = eq * float(cc.get("daily_budget_pct", 0.45)) - self._combo_spent_today()
+        if getattr(self, "_borrow_ok", False):  # whale share idle (bad prices): use it, keep a reserve
+            reserve = eq * float((cc.get("borrow", {}) or {}).get("keep_free_pct", 0.15))
+            left = max(left, self.cash() - reserve)
         stake = min(stake, left, max(0.0, self.cash() - 0.5))
         return round(stake, 2) if stake >= float(cc.get("min_stake_usd", 1.0)) else 0.0
 

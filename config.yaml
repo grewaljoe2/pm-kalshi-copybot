@@ -86,6 +86,14 @@ combos:
   max_combo_pct: 0.10       # at most 10% of balance in one combo
   daily_budget_pct: 0.45    # at most 45% of balance in combos per day (55% stays for whale copies)
   min_edge: 0.03            # only buy a combo at least 3c under our fair price (after fee)
+  # When whale bets are mostly bad prices on Kalshi today (and none good is waiting),
+  # parlays may also use the whale share's idle cash, always keeping 15% of the balance free.
+  borrow:
+    enabled: true
+    min_bad_price_skips: 5  # at least 5 whale bets skipped for bad prices today
+    max_copy_share: 0.35    # and at most 35% of today's whale bets were copyable
+    keep_free_pct: 0.15
+    rebuild_hours: 3        # while borrowing, look for new parlays every 3 hours
   # same-game legs: allowed when their game logs show they hit together
   same_game: true
   max_per_game: 3
