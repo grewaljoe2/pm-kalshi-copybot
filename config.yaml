@@ -19,7 +19,7 @@ kalshi:
 # Polymarket wallets to follow (use the proxy wallet shown on their profile)
 whales:
   - name: whale1
-    address: "0x0000000000000000000000000000000000000000"
+    address: "0x2005d16a84ceefa912d4e380cd32e7ff827875ea"
     min_trade_usd: 2000     # only copy their trades of at least this size
     copy_ratio: 0.01        # used when sizing = proportional
   # - name: whale2

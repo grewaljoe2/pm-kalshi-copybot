@@ -169,6 +169,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
 .scroll{overflow-x:auto}pre{margin:0;font-size:12px;white-space:pre-wrap;word-break:break-word;max-height:360px;overflow:auto}
 </style></head><body><main>
 <h1>Polymarket → Kalshi Copy Bot</h1>
+<p style="margin:-6px 0 12px"><a href="/report" style="color:inherit">Whale report →</a></p>
 {% if err %}<div class="card bad">{{ err }}</div>{% endif %}
 {% if st %}
 <div class="card">
@@ -200,6 +201,73 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
 {% endfor %}</pre></div>
 <div class="k" style="text-align:center">Updated {{ now }} · refreshes every 30s</div>
 </main></body></html>"""
+
+# ---- whale reports (refreshed every 6h, shown at /report) ------------------ #
+REPORTS: dict[str, dict] = {}
+
+
+def _report_loop():
+    import json
+    import whale_report
+    STOP.wait(20)  # let the bot start first
+    while not STOP.is_set():
+        cfg = copybot.load_yaml(os.environ.get("CONFIG_PATH", "config.yaml"))
+        for w in cfg.get("whales", []):
+            addr = w["address"].lower()
+            if addr.strip("0x") == "":
+                continue
+            try:
+                rep = whale_report.build(addr)
+                rep["name"] = w.get("name", addr[:8])
+                REPORTS[addr] = rep
+                # compact log lines so the report can also be read from Render logs
+                summary = {k: rep.get(k) for k in ("name", "wallet", "open", "closed", "trades",
+                                                  "kalshi_markets_scanned", "errors")}
+                summary["open"] = {k: v for k, v in (rep.get("open") or {}).items() if k != "top"}
+                log.info("WHALE_REPORT %s", json.dumps(summary, default=str))
+                for p in (rep.get("open") or {}).get("top", []):
+                    log.info("WHALE_POS %s", json.dumps(p, default=str))
+                for c in rep.get("kalshi_candidates", []):
+                    log.info("WHALE_MATCH %s", json.dumps(c, default=str))
+            except Exception as e:
+                log.warning("whale report for %s failed: %s", addr[:8], e)
+        STOP.wait(6 * 3600)
+
+
+threading.Thread(target=_report_loop, name="reports", daemon=True).start()
+
+
+@app.get("/api/report")
+def api_report():
+    return jsonify(REPORTS)
+
+
+@app.get("/report")
+def report_page():
+    return render_template_string(REPORT_PAGE, reports=list(REPORTS.values()))
+
+
+REPORT_PAGE = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Whale Report</title>
+<style>body{margin:0;font:15px/1.45 system-ui,sans-serif;background:#f6f6f4;color:#1d1d1b}
+@media (prefers-color-scheme:dark){body{background:#141413;color:#ecebe6}.card{background:#1e1e1c!important;border-color:#2e2e2b!important}}
+main{max-width:860px;margin:0 auto;padding:16px}.card{background:#fff;border:1px solid #e4e4df;border-radius:12px;padding:14px;margin-bottom:12px}
+table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;padding:5px 4px;border-bottom:1px solid #8883}
+.k{color:#888;font-size:12px}a{color:inherit}</style></head><body><main>
+<p><a href="/">← Dashboard</a></p>
+{% if not reports %}<div class="card">Report is being built (takes a minute or two after a restart). Refresh soon.</div>{% endif %}
+{% for r in reports %}
+<div class="card"><h2 style="margin:0 0 6px">{{ r.name }}</h2><div class="k">{{ r.wallet }}</div>
+{% set o=r.open or {} %}{% set c=r.closed or {} %}{% set t=r.trades or {} %}
+<p>Open: {{ o.count }} positions, ${{ '{:,.0f}'.format(o.value or 0) }} (unrealized ${{ '{:,.0f}'.format(o.unrealized_pnl or 0) }})<br>
+Closed: {{ c.count }} · win rate {{ ((c.win_rate or 0)*100)|round(1) }}% · realized ${{ '{:,.0f}'.format(c.realized_pnl or 0) }}<br>
+Trades: ~{{ t.per_day }}/day · median ${{ '{:,.0f}'.format(t.median_usd or 0) }} · last {{ t.last_trade_hours_ago }}h ago</p>
+{% if r.errors %}<p class="k">Errors: {{ r.errors|join('; ') }}</p>{% endif %}</div>
+<div class="card"><h3 style="margin-top:0">Kalshi match candidates</h3>
+{% for m in r.kalshi_candidates or [] %}<p><b>{{ m.pm_title }}</b> [{{ m.outcome }}] ${{ '{:,.0f}'.format(m.value) }}<br>
+{% for x in m.matches %}<span class="k">{{ x.score }}</span> {{ x.ticker }} — {{ x.text }}<br>{% endfor %}</p>{% endfor %}</div>
+{% endfor %}</main></body></html>"""
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
