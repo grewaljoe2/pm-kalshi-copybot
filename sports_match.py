@@ -131,7 +131,10 @@ class SportsMatcher:
         m = re.match(r"([a-z0-9]+)-(.*?)-?(\d{4}-\d{2}-\d{2})", ev or slug)
         if not m:
             return None
-        prefix, d = m.group(1), datetime.strptime(m.group(3), "%Y-%m-%d").date()
+        try:
+            prefix, d = m.group(1), datetime.strptime(m.group(3), "%Y-%m-%d").date()
+        except ValueError:
+            return None  # malformed date in the slug
         codes = [x for x in m.group(2).split("-") if x]
         if prefix not in PREFIX_SERIES:
             return {"skip": f"league '{prefix}' not set up"}
