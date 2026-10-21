@@ -229,11 +229,51 @@ def _report_loop():
                     log.info("WHALE_POS %s", json.dumps(p, default=str))
                 whale_report.add_matches(rep)
                 log.info("WHALE_SCANNED %s kalshi markets", rep.get("kalshi_markets_scanned"))
+                _log_samples(addr)
                 for c in rep.get("kalshi_candidates", []):
                     log.info("WHALE_MATCH %s", json.dumps(c, default=str))
             except Exception as e:
                 log.warning("whale report for %s failed: %s", addr[:8], e)
         STOP.wait(6 * 3600)
+
+
+def _log_samples(addr: str) -> None:
+    """Temporary diagnostics: how Kalshi lists games and how whale trades look."""
+    import json
+    from collections import Counter
+    import whale_report
+    try:
+        km = whale_report.kalshi_markets()
+        series = Counter(m["ticker"].split("-")[0] for m in km)
+        games = {s: n for s, n in series.items() if any(k in s for k in ("GAME", "MATCH", "MAP", "FIGHT"))}
+        log.info("KSERIES_GAMES %s", json.dumps(sorted(games.items(), key=lambda x: -x[1])[:80]))
+        log.info("KSERIES_ALL %s", json.dumps(series.most_common(60)))
+        keys = ("ticker", "event_ticker", "title", "subtitle", "yes_sub_title", "no_sub_title",
+                "close_time", "expected_expiration_time", "rules_primary", "yes_ask", "yes_ask_dollars",
+                "volume", "status")
+        seen = set()
+        for m in km:
+            s = m["ticker"].split("-")[0]
+            if s in games and s not in seen and len(seen) < 12:
+                seen.add(s)
+                log.info("KSAMPLE %s", json.dumps({k: (str(m.get(k))[:200]) for k in keys}))
+        try:
+            ser = whale_report._get(f"{whale_report.KALSHI}/series", category="Sports")
+            lst = ser.get("series", []) or []
+            log.info("KSPORTS_SERIES_COUNT %d", len(lst))
+            names = [s.get("ticker") for s in lst]
+            for i in range(0, len(names), 150):
+                log.info("KSPORTS_SERIES %s", json.dumps(names[i:i + 150]))
+            esport = [(s.get("ticker"), s.get("title")) for s in lst
+                      if any(k in (s.get("title") or "").lower() for k in ("counter", "cs2", "csgo", "league of legends", "dota", "valorant", "esport", "tennis", "atp", "wta", "champions league"))]
+            log.info("KSPORTS_MATCHING %s", json.dumps(esport[:120]))
+        except Exception as e:
+            log.warning("series fetch failed: %s", e)
+        trades = whale_report._get(f"{whale_report.POLY}/trades", user=addr, limit=6)
+        for t in trades[:6]:
+            log.info("PMTRADE %s", json.dumps({k: v for k, v in t.items() if k not in ("icon", "profileImage", "profileImageOptimized", "bio", "pseudonym", "name")}))
+    except Exception as e:
+        log.warning("samples failed: %s", e)
 
 
 threading.Thread(target=_report_loop, name="reports", daemon=True).start()
