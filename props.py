@@ -193,10 +193,48 @@ class PropModel:
                 "last10_hits": sum(1 for v in last10 if v > line), "last10_n": len(last10),
                 "recent": vals[:5]}
 
+    # ESPN abbreviations that differ from Kalshi's
+    ALIAS = {"GS": "GSW", "NY": "NYK", "SA": "SAS", "NO": "NOP", "UTAH": "UTA", "WSH": "WAS",
+             "JAX": "JAC", "LA": "LAR"}
+
+    def _espn_starts(self, league: str, ymd: str) -> dict[str, float]:
+        """{'MILWAS': start_ts, ...} for one ET date from ESPN's scoreboard."""
+        key = f"sb-{league}-{ymd}"
+        if key in self._starts:
+            return self._starts[key] or {}
+        out: dict[str, float] = {}
+        try:
+            j = self._espn(f"/site/v2/sports/{SPORT[league]}/scoreboard", dates=ymd, limit=100)
+            for ev in j.get("events") or []:
+                comp = (ev.get("competitions") or [{}])[0]
+                teams = {c.get("homeAway"): (c.get("team") or {}).get("abbreviation", "").upper()
+                         for c in comp.get("competitors") or []}
+                a, h = teams.get("away", ""), teams.get("home", "")
+                ts = datetime.fromisoformat(ev["date"].replace("Z", "+00:00")).timestamp()
+                for x in {a, self.ALIAS.get(a, a)}:
+                    for y in {h, self.ALIAS.get(h, h)}:
+                        out[x + y] = ts
+                        out[y + x] = ts
+        except Exception as e:
+            log.debug("espn scoreboard %s %s: %s", league, ymd, e)
+            return {}
+        self._starts[key] = out
+        return out
+
     def start_time(self, league: str, prop_event: str) -> float | None:
         suffix = prop_event.split("-", 1)[1] if "-" in prop_event else ""
         if suffix in self._starts:
             return self._starts[suffix]
+        mm = re.match(r"(\d{2})([A-Z]{3})(\d{2})([A-Z]+)$", suffix)
+        if mm:
+            try:
+                d = datetime.strptime(mm.group(1) + mm.group(2) + mm.group(3), "%y%b%d")
+                st = self._espn_starts(league, d.strftime("%Y%m%d")).get(mm.group(4))
+                if st:
+                    self._starts[suffix] = st
+                    return st
+            except ValueError:
+                pass
         st = None
         try:
             ms = self._k("/markets", event_ticker=f"{GAME_SERIES[league]}-{suffix}", limit=2).get("markets") or []
