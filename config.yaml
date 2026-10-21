@@ -33,6 +33,19 @@ whales:
     address: "0xdaef2be2a19ad331737d06545f85615b094554e9"
     min_trade_usd: 500         # typical bet ~$1.8k
 
+  - name: Kch-Temp             # NFL + college football (spreads, totals, winners)
+    address: "0x924379a79c64b77ad5816ad362122a5f6228658e"
+    min_trade_usd: 2000        # typical bet ~$11k
+  - name: primm                # college football + NFL spreads/totals
+    address: "0xd38b71f3e8ed1af71983e5c309eac3dfa9b35029"
+    min_trade_usd: 100         # typical bet ~$310
+  - name: ArielFilipino        # college football + NFL spreads
+    address: "0xe18ecc345e00ee7c4f2d1f676f3dd2acb112f826"
+    min_trade_usd: 1000        # typical bet ~$4.5k
+  - name: ic4cream             # CFB, NBA, NFL, NHL
+    address: "0x27f738fe203827445690339104aae35b20bc44b0"
+    min_trade_usd: 150         # typical bet ~$420
+
 risk:
   sizing: fixed             # "fixed" or "proportional"
   fixed_usd: 25             # $ per copied trade when sizing = fixed
@@ -40,7 +53,7 @@ risk:
   min_whale_trade_usd: 1000
   max_usd_per_trade: 50
   max_usd_per_market: 150
-  max_usd_per_day: 300
+  max_usd_per_day: 1000       # paper-test limit; lower before going live
   max_slippage: 0.03        # won't pay more than whale price + 3c
   max_entry_price: 0.92     # skip near-certain markets (little upside)
   max_trade_age_seconds: 300
