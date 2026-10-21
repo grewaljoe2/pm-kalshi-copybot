@@ -1581,6 +1581,11 @@ class CopyBot:
             log.warning("combo reconcile: positions failed: %s", e)
             return
         rows = j.get("market_positions") or []
+        summ = [(p.get("ticker", "")[-12:], p.get("position_fp", p.get("position")),
+                 self.state.position(p.get("ticker") or "", "yes")) for p in rows if (p.get("ticker") or "").startswith("KXMVE")]
+        if summ != getattr(self, "_last_recon", None):
+            self._last_recon = summ
+            log.info("COMBO reconcile: Kalshi vs ledger %s (keys %s)", summ, sorted(rows[0].keys())[:14] if rows else [])
         for p in rows:
             tk = p.get("ticker") or ""
             if not tk.startswith("KXMVE"):
