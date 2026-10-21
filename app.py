@@ -66,6 +66,9 @@ def start_background() -> None:
         log.info("Background threads started in pid %d", os.getpid())
 
 
+import props_probe  # noqa: E402
+_register("props-probe", props_probe.run)
+
 # ---- bot thread ------------------------------------------------------------ #
 BOT: copybot.CopyBot | None = None
 BOT_ERROR: str | None = None
