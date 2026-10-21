@@ -86,6 +86,23 @@ class PropModel:
         self._ids: dict[tuple, str | None] = {}
         self._logs: dict[tuple, tuple[float, list]] = {}
         self._starts: dict[str, float | None] = {}
+        self.skips: dict[str, int] = {}
+
+    def _k(self, path: str, **params) -> dict:
+        """Kalshi public GET with backoff on 429 (rate limit)."""
+        for i in range(5):
+            try:
+                out = self.kget(path, **params)
+                time.sleep(0.12)  # stay under Kalshi's public rate limit
+                return out
+            except Exception as e:
+                if "429" not in str(e) or i == 4:
+                    raise
+                time.sleep(1.5 * (i + 1))
+        return {}
+
+    def _skip(self, why: str) -> None:
+        self.skips[why] = self.skips.get(why, 0) + 1
 
     # ---- ESPN ------------------------------------------------------------ #
     def _espn(self, path: str, **params) -> dict:
@@ -182,11 +199,11 @@ class PropModel:
             return self._starts[suffix]
         st = None
         try:
-            ms = self.kget("/markets", event_ticker=f"{GAME_SERIES[league]}-{suffix}", limit=2).get("markets") or []
+            ms = self._k("/markets", event_ticker=f"{GAME_SERIES[league]}-{suffix}", limit=2).get("markets") or []
             if ms:
                 st = self.kstart(ms[0])
         except Exception:
-            pass
+            return None  # don't cache failures
         self._starts[suffix] = st
         return st
 
@@ -197,7 +214,7 @@ class PropModel:
             p = {"series_ticker": series, "status": "open", "limit": 1000}
             if cursor:
                 p["cursor"] = cursor
-            j = self.kget("/markets", **p)
+            j = self._k("/markets", **p)
             out += j.get("markets") or []
             cursor = j.get("cursor")
             if not cursor:
@@ -208,6 +225,7 @@ class PropModel:
              hours_ahead: float = 36, nfl_hours_ahead: float = 110, min_before_s: int = 900) -> list[dict]:
         picks: list[dict] = []
         now = time.time()
+        self.skips = {}
         for series, (league, fields, label) in SERIES.items():
             try:
                 ms = self._markets(series)
@@ -219,6 +237,7 @@ class PropModel:
                 ask, bid = _px(m, "yes_ask"), _px(m, "yes_bid")
                 line = m.get("floor_strike")
                 if ask is None or line is None or not min_ask <= ask <= max_ask:
+                    self._skip("price outside range")
                     continue
                 if m.get("strike_type") not in (None, "greater"):
                     continue
@@ -227,25 +246,31 @@ class PropModel:
                     continue
                 start = self.start_time(league, m.get("event_ticker", ""))
                 if start is None or not (now + min_before_s < start < now + horizon):
+                    self._skip("start unknown / too soon / too far")
                     continue
                 aid = self.athlete_id(league, name)
                 if not aid:
+                    self._skip("player not found on ESPN")
                     continue
                 rows = self.game_log(league, aid)
                 if not rows:
+                    self._skip("no game log")
                     continue
                 try:
                     last = datetime.fromisoformat(rows[0]["date"].replace("Z", "+00:00")).timestamp()
                 except Exception:
                     continue
                 if (now - last) / 86400 > MAX_IDLE_DAYS[league]:
+                    self._skip("not played lately")
                     continue  # hasn't played lately (injury, benched, offseason)
                 hr = self.hit_rate(league, rows, fields, float(line))
                 if not hr:
+                    self._skip("too few games")
                     continue
                 mid = (ask + bid) / 2 if bid and ask - bid <= 0.12 else None
                 p = (1 - MARKET_WEIGHT) * hr["p_hist"] + MARKET_WEIGHT * (mid if mid is not None else ask)
                 if p < min_p:
+                    self._skip("hit chance below min")
                     continue
                 fee = self.fee_rate * ask * (1 - ask)
                 edge = p - ask
@@ -269,5 +294,6 @@ class PropModel:
             if k not in best or pk["score"] > best[k]["score"]:
                 best[k] = pk
         out = sorted(best.values(), key=lambda x: (-x["score"], -x["p"]))
-        log.info("props: %d candidate props (%d after one-per-player)", len(picks), len(out))
+        log.info("props: %d candidate props (%d after one-per-player); skipped %s", len(picks), len(out),
+                 sorted(self.skips.items(), key=lambda kv: -kv[1]))
         return out

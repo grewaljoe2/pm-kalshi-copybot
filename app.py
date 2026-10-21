@@ -72,6 +72,7 @@ PROPS: dict = {"picks": [], "updated": None, "error": None}
 
 
 def _props_loop():
+    import json
     from props import PropModel
     time.sleep(60)
     model = None
