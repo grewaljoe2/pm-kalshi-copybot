@@ -494,6 +494,9 @@ class CopyBot:
         self._last_catch_up = 0.0
         # Switching paper <-> live: archive the old ledger so paper bets never mix with real money
         last_mode = self.state.data.get("ledger_mode")
+        if last_mode is None and self.mode == "live" and (self.state.data.get("lots") or self.state.data.get("closed")
+                                                         or self.state.data.get("events")):
+            last_mode = "paper"  # data from before modes were recorded is paper data
         if last_mode and last_mode != self.mode:
             arch = self.state.data.setdefault("archive", {})
             arch[f"{last_mode}_{int(time.time())}"] = {
