@@ -1316,7 +1316,14 @@ class CopyBot:
             try:
                 tk = self.kalshi.create_combo(c["collection_ticker"], sel).get("market_ticker")
                 if tk:
-                    return tk, self.kdata.market(tk), errs
+                    for i in range(6):  # a new combo market can take a few seconds to show up
+                        for cli in (self.kdata, self.kalshi):
+                            try:
+                                return tk, cli.market(tk), errs
+                            except Exception:
+                                pass
+                        time.sleep(1.5 + i)
+                    return tk, {}, errs + ["combo price not available yet"]
             except Exception as e:
                 errs.append(f'{c.get("collection_ticker")}: {str(e)[:160]}')
         return None, {}, errs
@@ -1328,8 +1335,8 @@ class CopyBot:
         cc = self.cfg.get("combos", {}) or {}
         if not cc.get("enabled", False) or self.paused or not self.kalshi.pkey:
             return
-        if not self.state.data.get("combo_reset_v3"):  # new slate builder: run now
-            self.state.data["combo_reset_v3"] = True
+        if not self.state.data.get("combo_reset_v4"):  # new slate builder: run now
+            self.state.data["combo_reset_v4"] = True
             self.state.data["combo_last"] = 0
         if time.time() - float(self.state.data.get("combo_last", 0) or 0) < cc.get("every_days", 1) * 86400:
             return
@@ -1353,7 +1360,7 @@ class CopyBot:
             row = {"legs": [l["title"] for l in combo], "size": len(combo), "hit": round(hit, 3),
                    "ticker": combo_tk, "ask": ask, "price": px, "count": count, "stake": round(count * (px or 0), 2),
                    "payout": count, "action": ("TAKE" if take else "LIMIT") if combo_tk else "not offered",
-                   "note": "; ".join(errs[:1]) if not combo_tk else ""}
+                   "note": "; ".join(errs[-1:]) if (not combo_tk or not cm) else ""}
             slate.append(row)
             log.info("COMBO %d-leg hit %.0f%% %s -> %s %d @ %s (stake $%.2f, pays $%d)%s %s",
                      len(combo), 100 * hit, row["legs"], row["action"], count, px, row["stake"], count,
