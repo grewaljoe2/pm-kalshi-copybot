@@ -19,12 +19,19 @@ kalshi:
 
 # Polymarket wallets to follow (use the proxy wallet shown on their profile)
 whales:
-  - name: whale1
-    address: "0x2005d16a84ceefa912d4e380cd32e7ff827875ea"
-    min_trade_usd: 2000     # only copy their trades of at least this size
-    copy_ratio: 0.01        # used when sizing = proportional
-  # - name: whale2
-  #   address: "0x..."
+  # Picked from the sports screener on 2026-10-21 (see /report on the dashboard)
+  - name: KaneAnalytics        # NFL + college football
+    address: "0x7e3a1f95c558f39a51ff334d789e3e039b553246"
+    min_trade_usd: 1000        # their typical bet is ~$4.4k
+  - name: Steady-USsports      # CFB, NFL, MLB, NBA
+    address: "0x20d6436849f930584892730c7f96ebb2ac763856"
+    min_trade_usd: 100         # typical bet ~$240
+  - name: Kkunn                # tennis + Counter-Strike
+    address: "0xe7870d0e1bfc65a23e3d66caf00ca1b9129e5034"
+    min_trade_usd: 1000        # typical bet ~$2.9k
+  - name: PEYZ                 # League of Legends, NFL, CFB, NHL
+    address: "0xdaef2be2a19ad331737d06545f85615b094554e9"
+    min_trade_usd: 500         # typical bet ~$1.8k
 
 risk:
   sizing: fixed             # "fixed" or "proportional"
