@@ -5,7 +5,7 @@
 # "paper" = log what it would do, no orders.  "live" = real orders.
 mode: paper
 
-poll_seconds: 15
+poll_seconds: 10
 mappings_file: mappings.yaml
 auto_match_sports: true   # find the same game on Kalshi automatically
 state_file: state.json
@@ -52,6 +52,14 @@ catch_up:
   every_seconds: 900
   days_ahead: 3
   min_minutes_before: 10     # never copy within 10 min of start or after the game started
+
+# Copying whale bets placed during a game (strict: fresh + no worse price + smaller size).
+# Shown on the scoreboard as "<whale> · live" so you can compare with pre-game copies.
+live_games:
+  enabled: true
+  max_age_seconds: 30
+  max_slippage: 0.0
+  size_mult: 0.5
 
 # Bankroll mode (sizing: score). Paper mode tracks a virtual bankroll starting here.
 bankroll:

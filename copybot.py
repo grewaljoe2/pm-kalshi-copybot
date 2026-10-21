@@ -707,8 +707,26 @@ class CopyBot:
         ask = _px(m, f"{tgt.side}_ask")
         if ask is None or ask <= 0 or ask >= 1:
             return self._skip(t, name, "no ask on Kalshi")
-        limit = whale_px + r["max_slippage"]
-        if ask > limit:
+
+        # Live (in-game) bets: allowed only if very fresh and no worse than the whale's price
+        lv = self.cfg.get("live_games", {}) or {}
+        cls = self.sports.classify(t) or {}
+        status = (self.game_status(t.get("conditionId", ""), m, cls.get("date"))
+                  if t.get("conditionId") and cls.get("date") else "pre")  # non-sports markets: no game clock
+        is_live = status != "pre"
+        size_mult = 1.0
+        if is_live:
+            if not lv.get("enabled", False):
+                return self._skip(t, name, "game in progress (live copying off)")
+            age = time.time() - int(t.get("timestamp") or time.time())
+            if age > lv.get("max_age_seconds", 30):
+                return self._skip(t, name, f"live game: whale bet too old ({age:.0f}s)")
+            slip = lv.get("max_slippage", 0.0)
+            size_mult = float(lv.get("size_mult", 0.5))
+            name = f"{name} · live"
+        else:
+            slip = r["max_slippage"]
+        if ask > whale_px + slip + 1e-9:
             return self._skip(t, name, f"Kalshi ask {ask:.3f} > whale {whale_px:.3f} + slippage")
         if ask > r["max_entry_price"]:
             return self._skip(t, name, f"price {ask:.3f} above max_entry_price")
@@ -729,6 +747,9 @@ class CopyBot:
             budget, why = self._bankroll_budget(sc["score"], sc["ev"], held_usd)
             if why:
                 return self._skip(t, name, why)
+            budget *= size_mult
+            if budget < self.bank.get("min_stake_usd", 2.0):
+                return self._skip(t, name, "stake below minimum after live-game reduction")
         else:
             if r["sizing"] == "fixed":
                 budget = r["fixed_usd"]
