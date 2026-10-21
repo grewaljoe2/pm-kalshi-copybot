@@ -151,7 +151,7 @@ def index():
     st = BOT.status() if BOT else None
     return render_template_string(
         PAGE, st=st, err=BOT_ERROR, logs=list(LOG_LINES)[-80:][::-1],
-        trades=BOT.recent_journal(40) if BOT else [], ago=_ago,
+        trades=BOT.recent_journal(40) if BOT else [], ago=_ago, slate=SLATE,
         now=datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
     )
 
@@ -195,6 +195,15 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
   <form method="post" action="{{ '/resume' if st.paused else '/pause' }}" style="margin-top:12px">
     <button>{{ 'Resume copying' if st.paused else 'Pause copying' }}</button></form>
 </div>
+<div class="card"><h2>Today's slate</h2>
+{% if slate %}<div class="grid">
+<div><div class="k">Kalshi games today</div><div class="v">{{ slate.games }}</div></div>
+<div><div class="k">Spread/total lines</div><div class="v">{{ slate.spread_total_markets }}</div></div>
+<div><div class="k">Copied today</div><div class="v">{{ slate.copied_today }}</div></div>
+<div><div class="k">Skipped today</div><div class="v">{{ slate.skipped_today }}</div></div></div>
+<div class="k" style="margin-top:8px">{% for l,n in slate.by_league[:12] %}{{ l }} {{ n }}{% if not loop.last %} · {% endif %}{% endfor %}</div>
+{% if slate.skip_reasons %}<div class="k" style="margin-top:6px">Top skip reasons: {% for r,n in slate.skip_reasons[:4] %}{{ r }} ({{ n }}){% if not loop.last %}; {% endif %}{% endfor %}</div>{% endif %}
+{% else %}<div class="k">Counting today's games (about a minute after a restart)…</div>{% endif %}</div>
 <div class="card"><h2>Whale scoreboard (your copied results)</h2>
 {% if st.scoreboard %}<div class="scroll"><table><tr><th>Whale</th><th>Settled</th><th>Win %</th><th>P&amp;L</th><th>ROI</th><th>Open</th></tr>
 {% for b in st.scoreboard %}<tr><td>{{ b.whale }}</td><td>{{ b.closed }}</td><td>{{ b.win_rate if b.win_rate is not none else '—' }}{% if b.win_rate is not none %}%{% endif %}</td>
@@ -341,6 +350,60 @@ Trades: ~{{ t.per_day }}/day · median ${{ '{:,.0f}'.format(t.median_usd or 0) }
 <td>${{ '{:,.0f}'.format(s.pnl_month or 0) }}</td><td>${{ '{:,.0f}'.format(s.pnl_all or 0) }}</td><td>{{ s.per_day }}</td>
 <td>${{ '{:,.0f}'.format(s.median_usd or 0) }}</td><td>{{ s.copyable_pct }}%</td></tr>{% endfor %}</table></div></div>
 </main></body></html>"""
+
+
+
+# ---- today's slate: Kalshi games today in the leagues the bot copies -------- #
+SLATE: dict = {}
+
+
+def _slate_loop():
+    import json
+    from collections import Counter
+    from datetime import datetime, timedelta, timezone
+    import sports_match as sm
+    STOP.wait(30)
+    while not STOP.is_set():
+        try:
+            if BOT is not None:
+                today = (datetime.now(timezone.utc) - timedelta(hours=5)).date()  # US Central-ish day
+                per_league, lines = Counter(), 0
+                seen_series = set()
+                for prefix, series in sm.PREFIX_SERIES.items():
+                    for s in series:
+                        if s in seen_series:
+                            continue
+                        seen_series.add(s)
+                        try:
+                            ms = BOT.sports._series_markets(s)
+                        except Exception:
+                            continue
+                        evs = {m["event_ticker"] for m in ms if sm.parse_kalshi_date(m.get("event_ticker", "")) == today}
+                        if evs:
+                            per_league[s.replace("KX", "").replace("GAME", "").replace("MATCH", "").replace("FIGHT", "")] += len(evs)
+                for s in set(sm.SPREAD_SERIES.values()) | set(sm.TOTAL_SERIES.values()):
+                    try:
+                        ms = BOT.sports._series_markets(s)
+                    except Exception:
+                        continue
+                    lines += sum(1 for m in ms if sm.parse_kalshi_date(m.get("event_ticker", "")) == today)
+                ev = BOT.state.data.get("events", [])
+                tday = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                copied = sum(1 for e in ev if e.get("time_utc", "").startswith(tday) and e.get("action") == "buy")
+                skips = BOT.state.data.get("skips", {}).get(tday, {})
+                SLATE.clear()
+                SLATE.update({"date": str(today), "games": sum(per_league.values()),
+                              "by_league": per_league.most_common(), "spread_total_markets": lines,
+                              "copied_today": copied, "skipped_today": sum(skips.values()),
+                              "skip_reasons": sorted(skips.items(), key=lambda x: -x[1])[:8],
+                              "updated": time.time()})
+                log.info("SLATE %s", json.dumps(SLATE, default=str))
+        except Exception as e:
+            log.warning("slate failed: %s", e)
+        STOP.wait(1800)
+
+
+threading.Thread(target=_slate_loop, name="slate", daemon=True).start()
 
 
 if __name__ == "__main__":

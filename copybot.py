@@ -611,6 +611,12 @@ class CopyBot:
     # ---- logging --------------------------------------------------------- #
     def _skip(self, t, name, reason) -> None:
         log.info("  skip: %s", reason)
+        day = self.state.data.setdefault("skips", {})
+        today = day.setdefault(_today(), {})
+        key = reason.split("(")[0].split("'")[0].strip()[:60]
+        today[key] = today.get(key, 0) + 1
+        for k in sorted(day)[:-7]:
+            del day[k]
 
     def _journal(self, name, t, tgt, action, count, px) -> None:
         ev = self.state.data.setdefault("events", [])
