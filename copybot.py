@@ -1251,13 +1251,17 @@ class CopyBot:
     combo_slate: dict = {"combos": [], "slates": []}
 
     def _combo_pool(self, picks: list[dict], cc: dict) -> list[dict]:
-        """Best qualifying leg per game, most likely first."""
+        """Every strong leg (whale picks + top player props), most likely first."""
         pool = list(picks) + list(getattr(self, "prop_picks", []) or [])
-        best: dict[str, dict] = {}
+        legs, seen = [], set()
         for p in pool:
-            min_sc = cc.get("min_prop_score", 70) if p.get("kind") == "prop" else cc.get("min_score", 70)
-            if (p.get("status") != "pre" or p["score"] < min_sc or p["ev"] <= 0
-                    or p["side"] != "yes" or not 0.25 <= p["ask"] <= 0.93):
+            if p.get("kind") == "prop":
+                ok = (p.get("p", 0) >= cc.get("min_prop_chance", 0.70) and p["ev"] > 0
+                      and p["score"] >= cc.get("min_prop_score", 55))
+            else:
+                ok = p["score"] >= cc.get("min_score", 70) and p["ev"] > 0
+            if (not ok or p.get("status") != "pre" or p["side"] != "yes" or not 0.25 <= p["ask"] <= 0.93
+                    or p["ticker"] in seen):
                 continue
             if p.get("start") and p["start"] < time.time() + 900:
                 continue
@@ -1269,34 +1273,51 @@ class CopyBot:
                     continue
             if not ev:
                 continue
-            game = ev.split("-", 1)[1] if "-" in ev else ev
-            fair = float(p.get("p") or p["whale_px"])
-            leg = {"event_ticker": ev, "market_ticker": p["ticker"], "side": "yes", "fair": fair,
-                   "ask": p["ask"], "score": p["score"], "game": game, "start": p.get("start"),
-                   "title": p["outcome"] if p.get("kind") == "prop" else f'{p["title"]} — {p["outcome"]}'}
-            if game not in best or (leg["score"], fair) > (best[game]["score"], best[game]["fair"]):
-                best[game] = leg  # legs from the same game move together: one per game
-        return sorted(best.values(), key=lambda l: (-l["fair"], -l["score"]))
+            seen.add(p["ticker"])
+            legs.append({"event_ticker": ev, "market_ticker": p["ticker"], "side": "yes",
+                         "fair": float(p.get("p") or p["whale_px"]), "ask": p["ask"], "score": p["score"],
+                         "game": ev.split("-", 1)[1] if "-" in ev else ev, "start": p.get("start"),
+                         "player": p.get("player"),
+                         "title": p["outcome"] if p.get("kind") == "prop" else f'{p["title"]} — {p["outcome"]}'})
+        return sorted(legs, key=lambda l: (-l["fair"], -l["score"]))
 
     def _plan_slate(self, legs: list[dict], cc: dict, sizes: list[int]) -> list[list[dict]]:
-        """Split legs into separate combos (each leg used once). Strongest legs go into the small
-        combos (highest hit chance); 5-6 leg combos only use elite legs. A combo below the
-        hit-chance floor is shrunk until it clears it."""
+        """Put every leg into a combo, each leg used once. Inside one combo: one leg per game and
+        per player (legs from the same game move together). Strongest legs go into the small
+        combos; 5-6 leg combos only use elite legs; the size list repeats until all legs are used.
+        A combo below the hit-chance floor is shrunk until it clears it."""
         min_hit = float(cc.get("min_hit_chance", 0.30))
         elite = float(cc.get("elite_leg_chance", 0.84))
-        left, out = list(legs), []
-        for n in sizes:
-            pool = [l for l in left if n < 5 or l["fair"] >= elite]
-            if len(pool) < 2:
-                continue
-            take = pool[:n]
+        left, out, i, stalls = list(legs), [], 0, 0
+        while len(left) >= 2 and stalls < len(sizes):
+            n = sizes[i % len(sizes)]
+            i += 1
+            take, games, players = [], set(), set()
+            for l in left:
+                if len(take) >= n:
+                    break
+                if (n >= 5 and l["fair"] < elite) or l["game"] in games or (l.get("player") and l["player"] in players):
+                    continue
+                take.append(l)
+                games.add(l["game"])
+                if l.get("player"):
+                    players.add(l["player"])
             while len(take) > 2 and math.prod(l["fair"] for l in take) < min_hit:
-                take = take[:-1]
+                take.pop()
             if len(take) < 2 or math.prod(l["fair"] for l in take) < min_hit:
+                stalls += 1
                 continue
+            stalls = 0
             out.append(take)
             ids = {id(l) for l in take}
             left = [l for l in left if id(l) not in ids]
+        # a single leftover leg joins the last combo it fits in (different game, still >= floor)
+        for l in left:
+            for c in reversed(out):
+                if l["game"] not in {x["game"] for x in c} and len(c) < max(sizes) and \
+                        math.prod(x["fair"] for x in c) * l["fair"] >= min_hit:
+                    c.append(l)
+                    break
         return out
 
     def _build_combo(self, legs: list[dict]) -> tuple[str | None, dict, list]:
@@ -1342,11 +1363,16 @@ class CopyBot:
         cc = self.cfg.get("combos", {}) or {}
         if not cc.get("enabled", False) or self.paused or not self.kalshi.pkey:
             return
-        if not self.state.data.get("combo_reset_v5"):
-            self.state.data["combo_reset_v5"] = True
+        if not self.state.data.get("combo_reset_v6"):  # new all-legs planner: rebuild now
+            self.state.data["combo_reset_v6"] = True
             self.state.data["combo_last_by"] = {}
         legs = self._combo_pool(picks, cc)
-        used = self.state.data.setdefault("combo_games_used", {})  # game -> ts (don't re-bet a game)
+        # legs already inside an open or waiting combo are never bet again
+        in_play = " | ".join(str(x.get("title", "")) for x in
+                             self.state.data.get("resting", []) + self.state.data.get("lots", [])
+                             if str(x.get("whale", "")).startswith("Combo"))
+        legs = [l for l in legs if l["title"] not in in_play]
+        used = self.state.data.setdefault("combo_legs_used", {})  # leg ticker -> ts (never re-bet a leg)
         for g in [g for g, ts in used.items() if time.time() - ts > 8 * 86400]:
             used.pop(g, None)
         last_by = self.state.data.setdefault("combo_last_by", {})
@@ -1358,7 +1384,7 @@ class CopyBot:
                 continue
             if time.time() - float(last_by.get(lg, 0) or 0) < float(lc.get("every_hours", 24)) * 3600:
                 continue
-            lg_legs = [l for l in legs if self._combo_league(l["market_ticker"]) == lg and l["game"] not in used
+            lg_legs = [l for l in legs if self._combo_league(l["market_ticker"]) == lg and l["market_ticker"] not in used
                        and (not l.get("start") or l["start"] < time.time() + float(lc.get("max_hours_ahead", 30)) * 3600)]
             plan = self._plan_slate(lg_legs, cc, lc.get("sizes") or [2, 3, 4])
             if not plan:
@@ -1369,7 +1395,7 @@ class CopyBot:
             for combo, row in zip(plan, rows):
                 if row.get("placed"):
                     for l in combo:
-                        used[l["game"]] = time.time()
+                        used[l["market_ticker"]] = time.time()
             last_by[lg] = time.time()
             slates = [s for s in slates if s.get("league") != lg] + [
                 {"league": lg, "built": time.time(), "combos": rows, "legs_available": len(lg_legs),
@@ -1434,7 +1460,7 @@ class CopyBot:
                 {"id": oid, "ticker": combo_tk, "side": "yes", "price": price, "count": count,
                  "remaining": count, "filled": 0, "fee_rate": 0.0175, "whale": name, "title": title,
                  "outcome": "combo", "score": None, "expires": expires, "placed": int(time.time()),
-                 "pm_price": fair})
+                 "pm_price": fair, "legs_tickers": ",".join(l["market_ticker"] for l in legs)})
         return bool(oid)
 
     def check_settlements(self) -> None:

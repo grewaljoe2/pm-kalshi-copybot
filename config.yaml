@@ -76,7 +76,8 @@ combos:
   enabled: true
   dry_run: false            # LIVE: real orders
   min_score: 70             # whale legs
-  min_prop_score: 70        # player-prop legs (see props.py)
+  min_prop_chance: 0.70     # player-prop legs: 70%+ hit chance and a positive edge vs Kalshi
+  min_prop_score: 55
   min_hit_chance: 0.30      # never build a combo less likely than 30% to hit
   elite_leg_chance: 0.84    # legs allowed in 5-6 leg combos
   min_stake_usd: 1.0
@@ -85,12 +86,12 @@ combos:
       every_hours: 20
       max_hours_ahead: 30
       sizes: [2, 3, 4, 6]
-      budget_pct: 0.04      # 4% of balance per day across NBA combos
+      budget_pct: 0.08      # 8% of balance per day across NBA combos
     NFL:                    # upcoming games (this week), rebuilt daily with games not used yet
       every_hours: 20
       max_hours_ahead: 120
       sizes: [2, 3, 4, 6]
-      budget_pct: 0.04
+      budget_pct: 0.08
     OTHER:                  # whale picks from other leagues (college football etc.)
       every_hours: 20
       max_hours_ahead: 48
