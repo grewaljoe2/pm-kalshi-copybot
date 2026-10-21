@@ -184,6 +184,9 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
   {% elif st.mode == 'live' %}<span class="pill warn">LIVE · DEMO</span>
   {% else %}<span class="pill ok">PAPER</span>{% endif %}
   {% if st.paused %}<span class="pill warn">PAUSED</span>{% endif %}
+  {% if st.kalshi_link.linked %}<span class="pill ok">Kalshi {{ st.kalshi_link.env }} connected ✓ · ${{ '%.2f'|format(st.kalshi_link.balance) }}</span>
+  {% else %}<span class="pill warn">Kalshi not connected</span>{% endif %}
+  {% if not st.kalshi_link.linked and st.kalshi_link.detail %}<div class="k" style="margin-top:6px">{{ st.kalshi_link.detail }}</div>{% endif %}
   </div>
   <div class="grid">
     <div><div class="k">Last check</div><div class="v">{{ ago(st.last_poll) }}</div></div>

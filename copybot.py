@@ -244,7 +244,11 @@ class Kalshi:
                 pem = f.read()
         if key_id and pem:
             from cryptography.hazmat.primitives import serialization
-            self.pkey = serialization.load_pem_private_key(pem, password=None)
+            try:
+                self.pkey = serialization.load_pem_private_key(pem.strip() + b"\n", password=None)
+            except Exception as e:
+                log.error("Kalshi private key could not be read: %s", e)
+                self.pkey = None
 
     def _headers(self, method: str, path: str) -> dict:
         if not self.pkey:
@@ -397,6 +401,7 @@ class CopyBot:
         self.screen_buys: list = []  # recent buys of other top whales (from the screener)
         self.bank = cfg.get("bankroll", {}) or {}
         self.board_queue: list = []
+        self.kalshi_link: dict = {"linked": False, "detail": "no API key set"}
 
     # ---- pause switch (persisted, toggled from the dashboard) ------------ #
     @property
@@ -409,9 +414,32 @@ class CopyBot:
         log.warning("Bot %s from dashboard", "PAUSED" if value else "RESUMED")
 
     # ---- main loop ------------------------------------------------------- #
+    def check_kalshi_link(self) -> None:
+        """Log in to Kalshi with the API key (if set) and read the balance. Works in paper mode too."""
+        if not self.kalshi.key_id:
+            self.kalshi_link = {"linked": False, "detail": "no API key set"}
+        elif not self.kalshi.pkey:
+            self.kalshi_link = {"linked": False, "detail": "Key ID set but private key file missing or unreadable"}
+        else:
+            try:
+                bal = self.kalshi.balance_usd()
+                self.balance = bal if self.mode == "live" else self.balance
+                self.kalshi_link = {"linked": True, "env": self.kalshi_env, "balance": round(bal, 2),
+                                    "detail": f"connected to Kalshi {self.kalshi_env}"}
+            except Exception as e:
+                msg = str(e)
+                hint = (" (demo keys need KALSHI_ENV=demo, real keys need prod)"
+                        if "401" in msg or "403" in msg or "NOT_FOUND" in msg.upper() else "")
+                self.kalshi_link = {"linked": False, "detail": f"login failed: {msg[:160]}{hint}"}
+        log.info("KALSHI_LINK %s", self.kalshi_link)
+
     def run(self, once: bool = False, stop_event=None) -> None:
         log.info("mode=%s  kalshi_env=%s  whales=%d  mapped_markets=%d",
                  self.mode, self.kalshi_env, len(self.whales), len(self.maps))
+        try:
+            self.check_kalshi_link()
+        except Exception as e:
+            log.warning("kalshi link check failed: %s", e)
         if self.mode == "live" and self.kalshi_env == "prod":
             log.warning("*** LIVE TRADING WITH REAL MONEY ***")
         while True:
@@ -751,6 +779,7 @@ class CopyBot:
             "cash": round(self.cash(), 2),
             "start_usd": float(self.bank.get("start_usd", 100)),
             "sizing": self.risk.get("sizing"),
+            "kalshi_link": self.kalshi_link,
             "open_lots": len(self.state.data["lots"]),
             "last_poll": self.last_poll,
             "last_error": self.last_error,
