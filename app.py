@@ -179,6 +179,54 @@ def _kalshi_pnl_audit():
 _register("kalshi-pnl", _kalshi_pnl_audit)
 
 
+def _strategy_truth():
+    """Scoreboard on Kalshi's real numbers: every market we've traded, credited to the whale/strategy that
+    opened it (from our records), using Kalshi's realized P&L after fees. Logged as STRATEGY_TRUTH."""
+    import json
+    time.sleep(200)
+    while True:
+        try:
+            k = BOT.kalshi
+            rows, cur = [], None
+            for _ in range(15):
+                p = {"limit": 200, "settlement_status": "all"}
+                if cur:
+                    p["cursor"] = cur
+                j = k._req("GET", "/portfolio/positions", params=p)
+                rows += j.get("market_positions") or []
+                cur = j.get("cursor")
+                if not cur:
+                    break
+            owner = {}
+            for rec in BOT.state.data.get("closed", []) + BOT.state.data.get("lots", []):
+                w = str(rec.get("whale") or "?")
+                w = "Lag trade" if w.startswith("Lag trade") else ("Market maker" if w.startswith("MM ") else w)
+                owner.setdefault(rec.get("ticker"), {}).setdefault(w, 0.0)
+                owner[rec.get("ticker")][w] += float(rec.get("cost") or 0)
+            board = {}
+            for r in rows:
+                tk = r.get("ticker") or ""
+                if float(r.get("position_fp") or 0) != 0:
+                    continue  # still open: not realized yet
+                pnl = float(r.get("realized_pnl_dollars") or 0) - float(r.get("fees_paid_dollars") or 0)
+                o = owner.get(tk)
+                if not o:
+                    who = "Lag trade" if "15M-" in tk and tk.startswith(("KXBTC", "KXETH")) else (
+                        "Market maker" if "15M-" in tk else ("Combo" if tk.startswith("KXMVE") else "unknown"))
+                else:
+                    who = max(o, key=o.get)
+                b = board.setdefault(who, [0.0, 0, 0])
+                b[0] += pnl; b[1] += 1; b[2] += 1 if pnl > 0 else 0
+            out = sorted(([w, round(v[0], 2), v[1], v[2]] for w, v in board.items()), key=lambda x: -x[1])
+            log.info("STRATEGY_TRUTH (name, P&L after fees, markets, winners): %s", json.dumps(out))
+        except Exception as e:
+            log.warning("STRATEGY_TRUTH failed: %s", e)
+        time.sleep(3600)
+
+
+_register("strategy-truth", _strategy_truth)
+
+
 def trades_with_pnl(n: int = 40) -> list[dict]:
     """Copied-trades table with profit/loss: sells and settlements show what they made after fees;
     buys show 'open' while held, 'closed' once sold or settled."""
