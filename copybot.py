@@ -500,7 +500,8 @@ class Kalshi:
 
     def create_order(self, ticker: str, side: str, action: str, count: int,
                      price: float, tif: str | None, post_only: bool = False,
-                     expiration_ts: int | None = None, order_group_id: str | None = None) -> dict:
+                     expiration_ts: int | None = None, order_group_id: str | None = None,
+                     resting_sell: bool = False) -> dict:
         """Kalshi Create Order V2 (POST /portfolio/events/orders).
 
         V2 orders are always on the YES leg: 'bid' buys YES, 'ask' sells YES. So buying NO at q
@@ -519,7 +520,7 @@ class Kalshi:
             "time_in_force": tif or "good_till_canceled",
             "self_trade_prevention_type": "taker_at_cross",
         }
-        if action == "sell":
+        if action == "sell" and not resting_sell:
             body["time_in_force"] = "immediate_or_cancel"
             body["reduce_only"] = True  # V2 allows reduce_only only with IOC
         if post_only:

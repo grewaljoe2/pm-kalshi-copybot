@@ -570,8 +570,85 @@ class LagWatch:
         return pct, max_open, None
 
     # ---- exits ------------------------------------------------------------------ #
+    def _flip_exit(self, x: dict, fair: float, bid: float, rate: float, now: float) -> bool:
+        """Convergence flip: keep a resting sell (maker, no fee) just under the model value, so when Kalshi
+        catches up someone buys from us. Repriced as the value moves; never below entry + flip_min.
+        True = the trade is fully sold."""
+        if not self.cfg.get("flip_exit", True) or self.bot.mode != "live":
+            return False
+        k = self.bot.kalshi
+        eo = x.get("exit_order")
+        if eo and now - eo.get("polled", 0) >= 2:
+            eo["polled"] = now
+            try:
+                r = k.get_order(eo["id"])
+                f = int(float(r.get("fill_count_fp") or r.get("fill_count") or 0))
+                new = f - eo["filled"]
+                if new > 0:
+                    eo["filled"] = f
+                    self.bot.ledger_queue.append(("close", f"Lag trade · {x.get('group', '')}", x["ticker"], x["side"],
+                                                  new, eo["px"], x["title"]))
+                    log.info("LAGTRADE FLIP %d %s %s @ %.2f (bought %.2f, %+.1fc each, no fees)", new, x["ticker"],
+                             x["side"].upper(), eo["px"], x["entry"], 100 * (eo["px"] - x["entry"]))
+                    self._add_shadow(x, eo["px"], new)
+                    x["count"] -= new
+                    if x["count"] <= 0:
+                        self._log_path(x, "flipped")
+                        if x in self.stats["trades"]:
+                            self.stats["trades"].remove(x)
+                        return True
+                if str(r.get("status") or "").lower() in ("canceled", "cancelled", "expired", "executed"):
+                    x.pop("exit_order", None)
+                    eo = None
+            except Exception as e:
+                log.info("LAGTRADE exit poll %s: %s", eo.get("id"), str(e)[:100])
+        lo = x["entry"] + float(self.cfg.get("flip_min", 0.02))
+        target = round(max(lo, round(fair - 0.01, 2)), 2)
+        if target <= bid or target >= 0.99:
+            return False  # would cross (the bid already pays it: the normal take-profit sells) or nothing to gain
+        if eo and (abs(eo["px"] - target) < 0.02 or now - eo["t"] < 5):
+            return False
+        if eo:
+            try:
+                k.cancel_order(eo["id"], x["ticker"])
+            except Exception as e:
+                log.info("LAGTRADE exit cancel %s: %s", eo["id"], str(e)[:100])
+                return False
+            x.pop("exit_order", None)
+        try:
+            o = k.create_order(x["ticker"], x["side"], "sell", int(x["count"]), target, None, post_only=True,
+                               expiration_ts=int(float(x["close"]) - 60), resting_sell=True)
+            if o.get("order_id"):
+                x["exit_order"] = {"id": o["order_id"], "px": target, "filled": 0, "t": now, "polled": now}
+                log.info("LAGTRADE EXIT POSTED %d %s %s @ %.2f (bought %.2f, model %.2f)", x["count"], x["ticker"],
+                         x["side"].upper(), target, x["entry"], fair)
+        except Exception as e:
+            log.info("LAGTRADE exit post failed %s: %s", x["ticker"], str(e)[:120])
+        return False
+
+    def _drop_exit(self, x: dict) -> None:
+        eo = x.pop("exit_order", None)
+        if not eo:
+            return
+        try:
+            self.bot.kalshi.cancel_order(eo["id"], x["ticker"])
+            r = self.bot.kalshi.get_order(eo["id"])
+            f = int(float(r.get("fill_count_fp") or r.get("fill_count") or 0))
+            if f > eo["filled"]:  # filled just before the cancel
+                new = f - eo["filled"]
+                self.bot.ledger_queue.append(("close", f"Lag trade · {x.get('group', '')}", x["ticker"], x["side"],
+                                              new, eo["px"], x["title"]))
+                x["count"] -= new
+        except Exception as e:
+            log.info("LAGTRADE exit drop %s: %s", eo.get("id"), str(e)[:100])
+
     def _sell(self, x: dict, bid: float, rate: float, why: str) -> None:
         from copybot import Target
+        self._drop_exit(x)  # pull the resting flip exit first so we don't sell twice
+        if x["count"] <= 0:
+            if x in self.stats["trades"]:
+                self.stats["trades"].remove(x)
+            return
         filled, proceeds = self.bot._execute(Target(x["ticker"], x["side"]), "sell", x["count"], bid)
         if filled:
             px = proceeds / filled
@@ -642,6 +719,8 @@ class LagWatch:
                 if bid is None or bid < 0.02:
                     continue
                 x["peak"] = max(x.get("peak", 0.0), bid)
+                if self._flip_exit(x, fair, bid, rate, now):
+                    continue  # fully sold by the resting exit
                 path = x.setdefault("path", [])
                 if not path or now - path[-1][0] >= 5:
                     path.append((int(now), round(bid, 3), round(fair, 3)))
@@ -684,6 +763,9 @@ class LagWatch:
             # at least what the trade is worth
             if x.get("close") and self.cfg.get("hold_to_settle", True) and fair is not None and bid < fair:
                 x.setdefault("flip_px", bid)  # what the old quick flip would have sold at
+                continue
+            self._drop_exit(x)
+            if x["count"] <= 0:
                 continue
             filled, proceeds = self.bot._execute(Target(x["ticker"], x["side"]), "sell", x["count"], bid)
             if filled:
