@@ -179,7 +179,9 @@ class MarketMaker:
             n = size
             if inv_y != inv_n and ((side == "no" and inv_y > inv_n) or (side == "yes" and inv_n > inv_y)):
                 n = max(1, min(size, abs(net)))  # just enough to complete the pair
-            if self.bot.spendable_cash(True) - n * px < 1.0:
+            free = self.bot.cash() - 0.5  # may use the future pot's idle cash: it comes back within 15 min
+            if free - n * px < 0.5:
+                self.__dict__.setdefault("_last_gate", {})[st["coin"]] = f"no cash (${free:.2f} free)"
                 continue
             self._place(tk, st, side, n, px, m)
 
