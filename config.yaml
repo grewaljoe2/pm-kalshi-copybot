@@ -149,6 +149,7 @@ crypto_lag:
     paused: false           # true = no new quotes; still sells/stops what it holds
     kill_usd: 5             # off for the day if Kalshi says market making is down $5 after fees
     breaker_contracts: 6    # Kalshi order group: 6+ contracts filled within 15s -> Kalshi cancels all our quotes in that market
+    open_until_left_s: 300  # last 5 min: only quotes that complete a pair (no new one-sided risk)
     pull_c: 0.01            # pull a quote at once if the model value drops 1c under it
     pair_min_c: 0.02        # completing a pair must make at least 2c
     take_profit_pct: 0.5    # one-sided holding up 50%+ on cost: sell it

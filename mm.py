@@ -314,6 +314,11 @@ class MarketMaker:
             avg_n = st["inv"]["no"][1] / inv_n
             want["yes"] = min(want["yes"], round(math.floor((1 - avg_n - float(c.get("pair_min_c", 0.02))) * 100) / 100, 2))
             allow_y = True
+        if m["close"] - now < float(c.get("open_until_left_s", 300)):  # late in the window: only complete pairs
+            if not (inv_y < inv_n):
+                allow_y = False
+            if not (inv_n < inv_y):
+                allow_n = False
         if m["close"] - now < float(c.get("stop_before_close_s", 180)):
             allow_y = allow_n = False
         # never cross the book (post-only): stay at least a cent under the other side's price
@@ -415,8 +420,12 @@ class MarketMaker:
                 why = f"model stop: worth {value:.2f} vs cost {avg:.2f}"
             if not why:
                 continue
+            if time.time() < st.get("sell_wait", 0):
+                continue
             filled, proceeds = self.bot._execute(Target(tk, side), "sell", n, bid)
             if not filled:
+                st["sell_wait"] = time.time() + 10  # nothing sold (no buyer, or Kalshi holds less): re-check first
+                self._last_pos = 0
                 continue
             px = proceeds / filled
             name = f'MM · {st["coin"]} 15m'
