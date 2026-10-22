@@ -177,6 +177,9 @@ def trades_with_pnl(n: int = 40) -> list[dict]:
                        "action": "settled · " + ("won" if won else ("void" if c.get("result") not in ("yes", "no") else "lost")),
                        "contracts": c.get("count"), "price": "1.0000" if won else "0.0000",
                        "pnl": round(c.get("pnl", 0), 2), "mode": "live"})
+    for e in events:
+        e.setdefault("pnl", None)
+        e.setdefault("status", None)
     events.sort(key=lambda e: ts(e.get("time_utc")), reverse=True)
     return events[:n]
 
@@ -597,7 +600,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
 {% endif %}
 <div class="card"><h2>Copied trades</h2>
 {% if trades %}<div class="scroll"><table><tr><th>Time</th><th>Whale</th><th>Market</th><th>Action</th><th>Qty</th><th>Price</th><th>P&amp;L</th></tr>
-{% for t in trades %}<tr><td>{{ t.time_utc[5:16] }}</td><td>{{ t.whale }}</td><td>{{ t.kalshi_ticker }} {{ t.side|upper }}</td><td>{{ t.action }}{% if t.mode=='paper' %} (paper){% endif %}</td><td>{{ t.contracts }}</td><td>{{ t.price }}</td><td class="{{ 'ok' if (t.pnl or 0) > 0 else ('bad' if (t.pnl or 0) < 0 else '') }}">{% if t.pnl is not none %}<b>{{ '%+.2f'|format(t.pnl) }}</b>{% else %}{{ t.status or '' }}{% endif %}</td></tr>{% endfor %}
+{% for t in trades %}<tr><td>{{ t.time_utc[5:16] }}</td><td>{{ t.whale }}</td><td>{{ t.kalshi_ticker }} {{ t.side|upper }}</td><td>{{ t.action }}{% if t.mode=='paper' %} (paper){% endif %}</td><td>{{ t.contracts }}</td><td>{{ t.price }}</td><td class="{{ 'ok' if (t.pnl or 0) > 0 else ('bad' if (t.pnl or 0) < 0 else '') }}">{% if t.pnl is number %}<b>{{ '%+.2f'|format(t.pnl) }}</b>{% else %}{{ t.status or '' }}{% endif %}</td></tr>{% endfor %}
 </table></div>{% else %}<div class="k">No copied trades yet.</div>{% endif %}</div>
 <div class="card"><h2>Log</h2><pre>{% for l in logs %}{{ l }}
 {% endfor %}</pre></div>
