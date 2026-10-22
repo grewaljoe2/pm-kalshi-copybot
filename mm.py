@@ -27,10 +27,30 @@ log = logging.getLogger("mm")
 class MarketMaker:
     def __init__(self, bot, crypto, cfg: dict):
         self.bot, self.cl, self.cfg = bot, crypto, cfg or {}
-        self.mk: dict[str, dict] = {}      # ticker -> {"orders": {side: {...}}, "inv": {"yes": [n, cost], "no": [n, cost]}}
+        # ticker -> {"orders": {side: {...}}, "inv": {"yes": [n, cost], "no": [n, cost]}}; kept with the bot's
+        # records so a restart remembers what each window holds (old quotes are cancelled at startup)
+        self.mk: dict[str, dict] = bot.state.data.setdefault("mm_state", {})
+        self._rebuild_from_ledger()
         self._sig: dict[str, tuple] = {}   # product -> (time, momentum z, vol ratio)
         self._cleaned = False
         self.name = "MM"
+
+    def _rebuild_from_ledger(self) -> None:
+        """Holdings per window come from the bot's open lots (the source of truth after a restart)."""
+        inv: dict[str, dict] = {}
+        for l in self.bot.state.data.get("lots", []):
+            if str(l.get("whale", "")).startswith("MM ") and l.get("count", 0) > 0:
+                d = inv.setdefault(l["ticker"], {"yes": [0, 0.0], "no": [0, 0.0]})
+                d[l["side"]][0] += l["count"]
+                d[l["side"]][1] += l["cost"]
+        for tk, d in inv.items():
+            st = self.mk.setdefault(tk, {"orders": {}, "last_poll": 0.0, "ticker": tk,
+                                         "coin": tk[2:].split("15M")[0], "close": time.time() + 900})
+            st["inv"] = d
+            log.info("MM restored holdings %s: YES %d / NO %d", tk, d["yes"][0], d["no"][0])
+        for tk, st in self.mk.items():
+            if tk not in inv:
+                st["inv"] = {"yes": [0, 0.0], "no": [0, 0.0]}
 
     # ---- settings ---------------------------------------------------------------- #
     def coins(self) -> set[str]:
@@ -96,6 +116,13 @@ class MarketMaker:
     def cleanup_orphans(self) -> None:
         """After a restart: cancel any of our old resting quotes on market-maker markets."""
         self._cleaned = True
+        for st in self.mk.values():
+            for side in list(st.get("orders", {})):  # catch fills on quotes from before the restart, then drop them
+                try:
+                    self._poll_one(st.get("ticker", ""), st, side)
+                except Exception:
+                    pass
+            st["orders"] = {}
         try:
             j = self.bot.kalshi._req("GET", "/portfolio/orders", params={"status": "resting", "limit": 200})
             for o in j.get("orders") or []:
@@ -126,7 +153,8 @@ class MarketMaker:
         if not self._cleaned:
             self.cleanup_orphans()
         st = self.mk.setdefault(tk, {"orders": {}, "inv": {"yes": [0, 0.0], "no": [0, 0.0]}, "last_poll": 0.0,
-                                     "coin": m["prod"].split("-")[0], "close": m["close"]})
+                                     "coin": m["prod"].split("-")[0], "close": m["close"], "ticker": tk})
+        st["close"] = m["close"]
         if now - st["last_poll"] >= float(self.cfg.get("poll_s", 2)):
             st["last_poll"] = now
             self._poll_fills(tk, st)
