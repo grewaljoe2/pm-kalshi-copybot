@@ -498,7 +498,7 @@ class LagWatch:
         bot.ledger_queue.append(("open", f"Lag trade · {grp}", p["ticker"], p["side"], filled, px, p["title"]))
         self.stats["trades"].append({"key": key, "ticker": p["ticker"], "side": p["side"], "count": filled,
                                      "entry": px, "t0": time.time(), "pm_mid": pm_mid, "title": p["title"],
-                                     "group": grp, "close": p.get("close")})
+                                     "group": grp, "close": p.get("close"), "cond": p.get("cond")})
         log.info("LAGTRADE [%s] BUY %d %s %s @ %.2f (Polymarket %.3f)", grp, filled, p["ticker"],
                  p["side"].upper(), px, pm_mid)
 
@@ -629,7 +629,7 @@ class LagWatch:
         sh = self.stats.setdefault("shadow", [])
         sh.append({"key": x["key"], "ticker": x["ticker"], "side": x["side"], "group": x.get("group"),
                    "entry": x["entry"], "sold": sold, "count": n, "close": x["close"], "t_sell": int(time.time()),
-                   "max_bid": sold, "bid_late": None})
+                   "max_bid": sold, "bid_late": None, "cond": x.get("cond")})
         del sh[:-300]
 
     def paper_stop(self, ticker: str, fair_yes: float, yes_bid: float, yes_ask: float, secs_left: float) -> None:
@@ -686,7 +686,8 @@ class LagWatch:
             rec = {"held": bool(s.get("held")), "ticker": s["ticker"], "side": s["side"], "group": s.get("group"), "n": n, "entry": e,
                    "sold": s["sold"], "result": res, "flip": round(flip, 2), "hold": round(hold, 2),
                    "lock_2min": round(lock, 2), "best_possible": round(best, 2), "stop_loss": round(stop, 2),
-                   "stop_hit": s.get("stop_px") is not None, "day": __import__("copybot")._today()}
+                   "stop_hit": s.get("stop_px") is not None, "day": __import__("copybot")._today(),
+                   "actual": round(hold if s.get("held") else flip, 2), "cond": s.get("cond")}
             done.append(rec)
             log.info("LAG_SHADOW %s", json.dumps(rec))
         del done[:-1000]
@@ -707,7 +708,7 @@ class LagWatch:
                 sh.append({"key": x["key"], "ticker": x["ticker"], "side": x["side"], "group": x.get("group"),
                            "entry": x["entry"], "sold": x.get("flip_px") or x["entry"], "count": x["count"],
                            "close": x["close"], "t_sell": None, "max_bid": x.get("flip_px") or x["entry"],
-                           "bid_late": None, "held": True, "stop_px": x.get("stop_px")})
+                           "bid_late": None, "held": True, "stop_px": x.get("stop_px"), "cond": x.get("cond")})
             self.stats["trades"] = [x for x in self.stats["trades"] if not done(x)]
 
     def _log_path(self, x: dict, how: str) -> None:

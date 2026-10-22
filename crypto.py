@@ -281,7 +281,33 @@ class CryptoLag:
                 if not (lo <= ask <= 1 - lo):
                     continue
                 p = {"ticker": tk, "side": side, "title": m["title"], "start": m.get("open"), "close": m["close"]}
+                p["cond"] = self.conditions(m["prod"], now)  # paper only: market conditions at entry
                 self.lw.check_external(p, grp, fair, ask, bid, now, rate, margin, window=min(60, m["close"] - now))
+
+    def conditions(self, prod: str, now: float) -> dict:
+        """Market conditions for the chop/trend study (recorded with each lag trade, no effect on trading):
+        mom2 = 2-min move in std devs (+ = up), btc2 = same for BTC, vol = short/long volatility,
+        eff5 = 5-min efficiency (|net move| / total path; near 0 = choppy, near 1 = clean trend),
+        flips5 = direction changes of 30s moves over 5 min."""
+        hit = getattr(self, "_cond", {}).get(prod)
+        if hit and now - hit[0] < 2:
+            return hit[1]
+        out = {}
+        try:
+            mom, ratio = self.mm.signals(prod)
+            btc = self.mm.signals("BTC-USD")[0] if prod != "BTC-USD" else mom
+            pts = [self.coins.price_at(prod, now - k * 30) for k in range(10, -1, -1)]
+            pts = [x for x in pts if x]
+            moves = [b - a for a, b in zip(pts, pts[1:])]
+            path = sum(abs(d) for d in moves)
+            eff = abs(pts[-1] - pts[0]) / path if path else 0.0
+            flips = sum(1 for a, b in zip(moves, moves[1:]) if a * b < 0)
+            out = {"mom2": round(mom, 2), "btc2": round(btc, 2), "vol": round(ratio, 2),
+                   "eff5": round(eff, 2), "flips5": flips}
+        except Exception:
+            pass
+        self.__dict__.setdefault("_cond", {})[prod] = (now, out)
+        return out
 
     def run(self, stop) -> None:
         every = float(self.cfg.get("poll_seconds", 1))
