@@ -22,29 +22,29 @@ whales:
   # Picked from the sports screener on 2026-10-21 (see /report on the dashboard)
   - name: KaneAnalytics        # NFL + college football
     address: "0x7e3a1f95c558f39a51ff334d789e3e039b553246"
-    min_trade_usd: 500        # their typical bet is ~$4.4k
+    min_trade_usd: 250        # their typical bet is ~$4.4k
   - name: Steady-USsports      # CFB, NFL, MLB, NBA
     address: "0x20d6436849f930584892730c7f96ebb2ac763856"
-    min_trade_usd: 50         # typical bet ~$240
+    min_trade_usd: 25         # typical bet ~$240
   - name: Kkunn                # tennis + Counter-Strike
     address: "0xe7870d0e1bfc65a23e3d66caf00ca1b9129e5034"
-    min_trade_usd: 500        # typical bet ~$2.9k
+    min_trade_usd: 250        # typical bet ~$2.9k
   - name: PEYZ                 # League of Legends, NFL, CFB, NHL
     address: "0xdaef2be2a19ad331737d06545f85615b094554e9"
-    min_trade_usd: 250         # typical bet ~$1.8k
+    min_trade_usd: 100         # typical bet ~$1.8k
 
   - name: Kch-Temp             # NFL + college football (spreads, totals, winners)
     address: "0x924379a79c64b77ad5816ad362122a5f6228658e"
-    min_trade_usd: 1000        # typical bet ~$11k
+    min_trade_usd: 500        # typical bet ~$11k
   - name: primm                # college football + NFL spreads/totals
     address: "0xd38b71f3e8ed1af71983e5c309eac3dfa9b35029"
-    min_trade_usd: 50         # typical bet ~$310
+    min_trade_usd: 25         # typical bet ~$310
   - name: ArielFilipino        # college football + NFL spreads
     address: "0xe18ecc345e00ee7c4f2d1f676f3dd2acb112f826"
-    min_trade_usd: 500        # typical bet ~$4.5k
+    min_trade_usd: 250        # typical bet ~$4.5k
   - name: ic4cream             # CFB, NBA, NFL, NHL
     address: "0x27f738fe203827445690339104aae35b20bc44b0"
-    min_trade_usd: 75         # typical bet ~$420
+    min_trade_usd: 25         # typical bet ~$420
 
 # Copy whales' bets that were already open before the bot saw them (pre-game only)
 catch_up:
@@ -57,7 +57,7 @@ catch_up:
 # Shown on the scoreboard as "<whale> · live" so you can compare with pre-game copies.
 live_games:
   enabled: true
-  max_age_seconds: 30
+  max_age_seconds: 300       # Polymarket reports trades a few minutes late; price check still protects
   max_slippage: 0.0
   size_mult: 0.5
 
@@ -155,7 +155,7 @@ risk:
   max_usd_per_day: 1000       # paper-test limit; lower before going live
   max_slippage: 0.03        # won't pay more than whale price + 3c
   max_entry_price: 0.92     # skip near-certain markets (little upside)
-  max_trade_age_seconds: 300
+  max_trade_age_seconds: 600   # Polymarket trade feed can lag a few minutes
   always_follow_exits: true # sell when whale sells, even below their price
   time_in_force: fill_or_kill
   fee_rate: 0.07            # Kalshi taker fee estimate: rate x contracts x P x (1-P)

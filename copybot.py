@@ -197,8 +197,20 @@ class State:
         return sorted(out, key=lambda x: -x["pnl"])
 
 
+LOCAL_TZ = "America/Chicago"
+
+
+def _local_day(iso_utc: str) -> str:
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.fromisoformat(iso_utc.replace("Z", "+00:00")).astimezone(ZoneInfo(LOCAL_TZ)).strftime("%Y-%m-%d")
+    except Exception:
+        return ""  # the bot's "day" (daily limits, skips, combo budget) follows Central time
+
+
 def _today() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo(LOCAL_TZ)).strftime("%Y-%m-%d")
 
 
 # --------------------------------------------------------------------------- #
@@ -473,10 +485,27 @@ class Kalshi:
         try:
             res = self._req("POST", "/portfolio/events/orders", json=body)
         except RuntimeError as e:
-            if action != "buy" or "shard" not in str(e).lower():
+            msg = str(e).lower()
+            if action != "buy" or ("shard" not in msg and "insufficient" not in msg):
                 raise
+            # Cash sits in several Kalshi pools: pull it into this market's pool and retry,
+            # buying fewer contracts if there still isn't enough for the full size.
             self.__dict__.setdefault("_shard_cache", {}).pop(ticker, None)
-            self.ensure_shard_funds(ticker, need, wait_s=20)
+            try:
+                self.ensure_shard_funds(ticker, need + 0.5, wait_s=20)
+            except Exception as ee:
+                log.warning("  shard top-up failed: %s", ee)
+            try:
+                bals = self.shard_balances()
+                avail = bals.get(self.market_shard(ticker), 0.0)
+            except Exception:
+                bals, avail = {}, need
+            unit = price + 0.07 * price * (1 - price)
+            fit = int(max(0.0, avail - 0.05) // unit) if unit > 0 else 0
+            log.info("  retry %s: pools %s, room for %d of %d contracts", ticker, bals, fit, count)
+            if fit < 1:
+                raise
+            body["count"] = f"{min(int(count), fit)}"
             body["client_order_id"] = str(uuid.uuid4())
             res = self._req("POST", "/portfolio/events/orders", json=body)
         filled = float(res.get("fill_count") or 0)
@@ -1498,7 +1527,8 @@ class CopyBot:
     def _combo_spent_today(self) -> float:
         """Money in combos today = combos bought today + combo limit orders still waiting.
         (Waiting orders that expire or get cancelled free their money again.)"""
-        day0 = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        from zoneinfo import ZoneInfo
+        day0 = datetime.now(ZoneInfo(LOCAL_TZ)).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         bought = sum(float(l.get("cost", 0)) + float(l.get("fee", 0)) for l in self.state.data.get("lots", [])
                      if str(l.get("whale", "")).startswith("Combo") and float(l.get("opened", 0)) >= day0)
         waiting = sum(float(r.get("price", 0)) * float(r.get("remaining", 0)) for r in self.state.data.get("resting", [])
@@ -1643,7 +1673,7 @@ class CopyBot:
         bad_words = ("expected value", "slippage", "price", "stale", "fee")
         bad = sum(n for k, n in skips.items() if any(w in k.lower() for w in bad_words))
         copied = sum(1 for e in self.state.data.get("events", [])
-                     if e.get("time_utc", "").startswith(today) and str(e.get("action", "")).startswith("buy")
+                     if _local_day(e.get("time_utc", "")) == today and str(e.get("action", "")).startswith("buy")
                      and not str(e.get("whale", "")).startswith("Combo"))
         board_min = float(((self.bank.get("board") or {}).get("min_score")) or 70)
         pending = sum(1 for p in picks if p.get("kind") != "prop" and p.get("status") == "pre"
