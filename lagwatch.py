@@ -1,30 +1,35 @@
 """
-Live lag watcher: during games, does Kalshi's price trail Polymarket's?
+Lag watcher / trader: when Kalshi's price trails Polymarket's for the same bet, buy on Kalshi.
 
-For every bet the bot has matched on both exchanges (whale trades, top-trader picks), while
-the game is live it polls Polymarket's order book and Kalshi's market every few seconds.
+Which bets: every sports game listed on both exchanges. Every 10 minutes it pulls Polymarket's
+sports events, matches each market to Kalshi with the bot's SportsMatcher (winner, spread,
+total, maps), and keeps the ones that are live now or start within the next 12 hours.
+Bets from whale trades and top-trader picks are added too.
 
-A "gap" opens when Kalshi's ask is cheaper than Polymarket's mid price by more than the
-Kalshi fee plus a margin: buying on Kalshi would be getting the bet below the price the
-bigger market says it's worth. For each gap it records how big it got, how long it lasted,
-and whether Kalshi caught up within a minute (could we have sold for a profit?).
+How often: live games every 5s, upcoming (pre-game) games every 30s. Kalshi prices come in
+batches (many tickers per request); Polymarket books come in one batched request too.
 
-mode "watch" only measures. With auto_switch on, it flips itself to "trade" once enough gaps
-have shown up across several games and most of them could have been sold for a profit after
-both fees. In "trade" mode it buys the gap on Kalshi (small size) and sells as soon as selling
-nets at least 1c after fees; if Kalshi never catches up it simply holds a bet it bought below
-Polymarket's price until the game settles.
+A "gap" = Kalshi's ask is cheaper than Polymarket's mid by more than the Kalshi fee + margin.
+For each gap it records size, length, and whether we could have sold on Kalshi for 1c+ per
+contract after both fees within the check window (60s live, 10 min pre-game).
+
+Evidence is kept per league and per phase (e.g. "NBA", "NBA pre", "ATP", "CS2"). Each group
+switches itself from watch to trade separately once it has enough gaps across enough games
+with a high enough after-fee success rate. In trade mode it buys the gap (small size), sells
+once it nets 1c+ after fees, and otherwise holds a bet bought below Polymarket's price.
 """
 from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 
 import requests
 
 log = logging.getLogger("lagwatch")
 CLOB = "https://clob.polymarket.com"
+GAMMA = "https://gamma-api.polymarket.com"
 
 
 def _px(m: dict, f: str):
@@ -35,117 +40,248 @@ def _px(m: dict, f: str):
     return float(v) / 100 if v not in (None, 0) else None
 
 
+def league_of(ticker: str) -> str:
+    """KXNBAGAME-.. -> NBA, KXATPMATCH-.. -> ATP, KXCS2MAP-.. -> CS2, KXNFLSPREAD -> NFL."""
+    s = ticker.split("-", 1)[0].upper()
+    s = s[2:] if s.startswith("KX") else s
+    s = re.sub(r"(1H|2H|1Q|2Q|3Q|4Q)?(GAME|SPREAD|TOTAL|TEAMTOTAL|MATCH|MAP|WINNER|BTTS|TIE)$", "", s)
+    return s or "OTHER"
+
+
+def _jl(v):
+    return json.loads(v) if isinstance(v, str) else (v or [])
+
+
 class LagWatch:
     def __init__(self, bot, cfg: dict):
         self.bot = bot
         self.cfg = cfg or {}
         self.s = requests.Session()
         self.s.headers.update({"User-Agent": "pm-kalshi-copybot/1.0"})
-        self.open: dict[str, dict] = {}      # key -> gap in progress
-        self.follow: list[dict] = []         # closed gaps waiting for the 60s convergence check
+        self.open: dict[str, dict] = {}
+        self.follow: list[dict] = []
+        self._last_disc = 0.0
+        self._last_pre = 0.0
         st = bot.state.data.setdefault("lagwatch", {})
-        st.setdefault("gaps", 0)
-        st.setdefault("converged", 0)
-        st.setdefault("examples", [])
-        st.setdefault("pairs_watched", 0)
-        if not st.get("strict_v2"):  # earlier counts used a looser "caught up" test: start fresh
+        for k, v in (("gaps", 0), ("converged", 0), ("examples", []), ("pairs_watched", 0),
+                     ("trades", []), ("games", []), ("groups", {})):
+            st.setdefault(k, v)
+        if not st.get("strict_v2"):
             st.update(gaps=0, converged=0, examples=[], games=[], strict_v2=True)
-        st.setdefault("mode", self.cfg.get("mode", "watch"))
-        st.setdefault("trades", [])
-        st.setdefault("games", [])
+        if not st.get("groups_v1"):  # tonight's evidence was NBA live games: carry it over
+            st["groups_v1"] = True
+            if st.get("mode") == "trade":
+                st["groups"]["NBA"] = {"gaps": st["gaps"], "converged": st["converged"],
+                                       "games": list(set(st.get("games", []))), "mode": "trade",
+                                       "switched_at": st.get("switched_at")}
         self.stats = st
 
-    # ---- prices ---------------------------------------------------------- #
-    def pm_book(self, token: str) -> tuple[float | None, float | None]:
-        r = self.s.get(f"{CLOB}/book", params={"token_id": token}, timeout=8)
-        r.raise_for_status()
-        j = r.json()
-        bids = [float(x["price"]) for x in j.get("bids") or []]
-        asks = [float(x["price"]) for x in j.get("asks") or []]
-        return (max(bids) if bids else None, min(asks) if asks else None)
-
-    def live_pairs(self) -> list[dict]:
+    # ---- discovery ---------------------------------------------------------- #
+    def discover(self) -> None:
+        """Find every Polymarket sports market that the bot can match to Kalshi."""
         now = time.time()
-        out = []
-        for p in list((getattr(self.bot, "pairs", {}) or {}).values()):
-            if now - p.get("added", now) > 30 * 3600:
+        found, scanned = 0, 0
+        pairs = self.bot.__dict__.setdefault("pairs", {})
+        for offset in range(0, int(self.cfg.get("discover_max_events", 600)), 100):
+            try:
+                r = self.s.get(f"{GAMMA}/events", params={"active": "true", "closed": "false", "tag_slug": "sports",
+                                                         "limit": 100, "offset": offset}, timeout=20)
+                r.raise_for_status()
+                evs = r.json()
+            except Exception as e:
+                log.warning("lagwatch discover failed: %s", e)
+                break
+            if not evs:
+                break
+            for ev in evs:
+                for m in ev.get("markets") or []:
+                    scanned += 1
+                    start = self._start(m, ev)
+                    if not start or not (now - 4 * 3600 <= start <= now + 12 * 3600):
+                        continue
+                    outs, toks = _jl(m.get("outcomes")), _jl(m.get("clobTokenIds"))
+                    for i, (o, tok) in enumerate(zip(outs, toks)):
+                        t = {"slug": m.get("slug"), "eventSlug": ev.get("slug"), "title": m.get("question") or ev.get("title"),
+                             "outcome": o, "outcomeIndex": i, "conditionId": m.get("conditionId")}
+                        try:
+                            hit, _ = self.bot.sports.lookup(t)
+                        except Exception:
+                            hit = None
+                        if not hit:
+                            continue
+                        key = f'{hit["ticker"]}|{hit["side"]}'
+                        p = pairs.setdefault(key, {"cond": t["conditionId"], "outcome": str(o), "ticker": hit["ticker"],
+                                                   "side": hit["side"], "title": t["title"] or "", "added": now})
+                        p.update(start=start, token=str(tok), seen=now)
+                        found += 1
+            time.sleep(0.3)
+        log.info("LAGWATCH discovery: %d Polymarket markets scanned, %d matched to Kalshi (%d pairs tracked)",
+                 scanned, found, len(pairs))
+
+    def _safe_discover(self) -> None:
+        try:
+            self.discover()
+        except Exception as e:
+            log.warning("lagwatch discovery crashed: %s", e)
+
+    @staticmethod
+    def _start(m: dict, ev: dict) -> float | None:
+        from datetime import datetime
+        for v in (m.get("gameStartTime"), ev.get("startTime"), m.get("eventStartTime"), ev.get("startDate")):
+            if not v:
                 continue
-            if "start" not in p:  # look up once per pair (start time + Polymarket token)
+            txt = str(v).strip().replace(" ", "T").replace("Z", "+00:00")
+            if re.search(r"[+-]\d\d$", txt):
+                txt += ":00"
+            try:
+                return datetime.fromisoformat(txt).timestamp()
+            except ValueError:
+                continue
+        return None
+
+    # ---- prices (batched) ------------------------------------------------------ #
+    def pm_books(self, tokens: list[str]) -> dict[str, tuple]:
+        out = {}
+        for i in range(0, len(tokens), 50):
+            chunk = tokens[i:i + 50]
+            try:
+                r = self.s.post(f"{CLOB}/books", json=[{"token_id": t} for t in chunk], timeout=10)
+                r.raise_for_status()
+                for b in r.json() or []:
+                    bids = [float(x["price"]) for x in b.get("bids") or []]
+                    asks = [float(x["price"]) for x in b.get("asks") or []]
+                    out[str(b.get("asset_id"))] = (max(bids) if bids else None, min(asks) if asks else None)
+            except Exception:
+                for t in chunk:  # fall back to one book at a time
+                    try:
+                        r = self.s.get(f"{CLOB}/book", params={"token_id": t}, timeout=8)
+                        b = r.json()
+                        bids = [float(x["price"]) for x in b.get("bids") or []]
+                        asks = [float(x["price"]) for x in b.get("asks") or []]
+                        out[t] = (max(bids) if bids else None, min(asks) if asks else None)
+                    except Exception:
+                        pass
+        return out
+
+    def k_markets(self, tickers: list[str]) -> dict[str, dict]:
+        out = {}
+        for i in range(0, len(tickers), 50):
+            chunk = tickers[i:i + 50]
+            try:
+                j = self.bot.kdata._req("GET", "/markets", params={"tickers": ",".join(chunk), "limit": len(chunk)})
+                for m in j.get("markets") or []:
+                    out[m.get("ticker")] = m
+            except Exception as e:
+                log.debug("kalshi batch failed: %s", e)
+        return out
+
+    # ---- groups ---------------------------------------------------------------- #
+    @staticmethod
+    def group_of(p: dict, live: bool) -> str:
+        lg = league_of(p["ticker"])
+        return lg if live else f"{lg} pre"
+
+    def _g(self, name: str) -> dict:
+        return self.stats["groups"].setdefault(name, {"gaps": 0, "converged": 0, "games": [], "mode": "watch"})
+
+    def trading(self, group: str) -> bool:
+        return self._g(group).get("mode") == "trade"
+
+    # ---- loop ----------------------------------------------------------------- #
+    def select(self) -> tuple[list[dict], list[dict]]:
+        now = time.time()
+        live, pre = [], []
+        for p in list((getattr(self.bot, "pairs", {}) or {}).values()):
+            if "start" not in p:  # from whale trades: look up once
                 try:
                     info = self.bot.pm.market_info(p["cond"])
+                    p["start"], p["token"] = info.get("start"), (info.get("tokens") or {}).get(p["outcome"])
                 except Exception:
                     continue
-                p["start"] = info.get("start")
-                p["token"] = (info.get("tokens") or {}).get(p["outcome"])
-            start, tok = p.get("start"), p.get("token")
-            if not start or not tok or not (start <= now <= start + 4 * 3600):
+            st, tok = p.get("start"), p.get("token")
+            if not st or not tok:
                 continue
-            out.append(p)
-        return out[: int(self.cfg.get("max_pairs", 12))]
+            if st <= now <= st + 4 * 3600:
+                live.append(p)
+            elif now < st <= now + 12 * 3600:
+                pre.append(p)
+        pre.sort(key=lambda p: p["start"])
+        return live[: int(self.cfg.get("max_live", 60))], pre[: int(self.cfg.get("max_pre", 60))]
 
-    # ---- loop ------------------------------------------------------------- #
     def tick(self) -> None:
-        margin = float(self.cfg.get("min_gap", 0.03))
-        rate = getattr(self.bot, "fee_rate", 0.07)
-        pairs = self.live_pairs()
-        self.stats["pairs_watched"] = len(pairs)
         now = time.time()
-        for p in pairs:
-            key = f'{p["ticker"]}|{p["side"]}'
-            try:
-                bid, ask = self.pm_book(p["token"])
-                m = self.bot.kdata.market(p["ticker"])
-            except Exception:
-                continue
-            if bid is None or ask is None or ask - bid > 0.04:
-                continue  # Polymarket book too thin to trust
-            pm_mid = (bid + ask) / 2
-            k_ask = _px(m, f'{p["side"]}_ask')
-            k_bid = _px(m, f'{p["side"]}_bid')
-            if not k_ask or k_ask <= 0 or k_ask >= 1:
-                continue
-            gap = pm_mid - k_ask - rate * k_ask * (1 - k_ask)
-            g = self.open.get(key)
-            if gap >= margin:
-                if not g:
-                    self.open[key] = {"key": key, "title": p["title"], "ticker": p["ticker"], "side": p["side"],
-                                      "t0": now, "entry": k_ask, "pm_mid": round(pm_mid, 3), "max_gap": gap}
-                    log.info("LAGWATCH gap open %s %s: Kalshi ask %.2f vs Polymarket %.3f (gap %.1fc)",
-                             p["ticker"], p["side"].upper(), k_ask, pm_mid, 100 * gap)
-                    if self.stats.get("mode") == "trade":
-                        self._buy(p, k_ask, pm_mid)
-                else:
-                    g["max_gap"] = max(g["max_gap"], gap)
-            elif g:
-                g["secs"] = round(now - g["t0"])
-                g["closed"] = now
-                self.follow.append(g)
-                del self.open[key]
-            # convergence check: within 60s, could we have sold for >= 1c after both fees?
-            for f in [f for f in self.follow if f["key"] == key]:
-                if k_bid and self._net(f["entry"], k_bid, rate) >= 0.01:
-                    f["converged"] = True
-                if now - f["t0"] > 60 or f.get("converged"):
-                    self._record(f)
-                    self.follow.remove(f)
-            if self.stats.get("mode") == "trade" and k_bid:
-                self._maybe_sell(key, k_bid, rate)
-            time.sleep(0.15)
-        # trades on games that ended are left to settle normally
-        self.stats["trades"] = [x for x in self.stats["trades"] if now - x["t0"] < 5 * 3600]
+        if now - self._last_disc > float(self.cfg.get("discover_every_s", 600)):
+            self._last_disc = now
+            import threading  # discovery can take a minute: don't stall live polling
+            threading.Thread(target=self._safe_discover, daemon=True, name="lag-discover").start()
+        live, pre = self.select()
+        do_pre = now - self._last_pre > float(self.cfg.get("pre_poll_seconds", 30))
+        if do_pre:
+            self._last_pre = now
+        batch = [(p, True) for p in live] + ([(p, False) for p in pre] if do_pre else [])
+        self.stats["pairs_watched"] = len(live)
+        self.stats["pre_watched"] = len(pre)
+        if not batch:
+            return
+        books = self.pm_books(sorted({p["token"] for p, _ in batch}))
+        kms = self.k_markets(sorted({p["ticker"] for p, _ in batch}))
+        for p, is_live in batch:
+            b, m = books.get(p["token"]), kms.get(p["ticker"])
+            if b and m:
+                self._check(p, is_live, b, m, now)
+        self.stats["trades"] = [x for x in self.stats["trades"] if now - x["t0"] < 18 * 3600]
+
+    def _check(self, p: dict, is_live: bool, book: tuple, m: dict, now: float) -> None:
+        rate = getattr(self.bot, "fee_rate", 0.07)
+        margin = float(self.cfg.get("min_gap", 0.03))
+        bid, ask = book
+        if bid is None or ask is None or ask - bid > 0.04:
+            return
+        pm_mid = (bid + ask) / 2
+        k_ask, k_bid = _px(m, f'{p["side"]}_ask'), _px(m, f'{p["side"]}_bid')
+        if not k_ask or k_ask <= 0.02 or k_ask >= 0.98:
+            return
+        key = f'{p["ticker"]}|{p["side"]}'
+        grp = self.group_of(p, is_live)
+        gap = pm_mid - k_ask - self._fee(k_ask, rate)
+        g = self.open.get(key)
+        if gap >= margin:
+            if not g:
+                self.open[key] = {"key": key, "title": p["title"], "ticker": p["ticker"], "side": p["side"],
+                                  "t0": now, "entry": k_ask, "pm_mid": round(pm_mid, 3), "max_gap": gap,
+                                  "group": grp, "live": is_live}
+                log.info("LAGWATCH [%s] gap %s %s: Kalshi %.2f vs Polymarket %.3f (%.1fc)",
+                         grp, p["ticker"], p["side"].upper(), k_ask, pm_mid, 100 * gap)
+                if self.trading(grp):
+                    self._buy(p, k_ask, pm_mid, grp)
+            else:
+                g["max_gap"] = max(g["max_gap"], gap)
+        elif g:
+            g["secs"] = round(now - g["t0"])
+            self.follow.append(g)
+            del self.open[key]
+        window = 60 if is_live else 600
+        for f in [f for f in self.follow if f["key"] == key]:
+            if k_bid and self._net(f["entry"], k_bid, rate) >= 0.01:
+                f["converged"] = True
+            if now - f["t0"] > window or f.get("converged"):
+                self._record(f)
+                self.follow.remove(f)
+        if k_bid:
+            self._maybe_sell(key, k_bid, rate)
 
     @staticmethod
     def _fee(p: float, rate: float) -> float:
         return rate * p * (1 - p)
 
     def _net(self, entry: float, bid: float, rate: float) -> float:
-        """Profit per contract from buying at entry and selling at bid, after both taker fees."""
         return bid - entry - self._fee(entry, rate) - self._fee(bid, rate)
 
-    # ---- trade mode -------------------------------------------------------- #
-    def _buy(self, p: dict, ask: float, pm_mid: float) -> None:
+    # ---- trading ------------------------------------------------------------- #
+    def _buy(self, p: dict, ask: float, pm_mid: float, grp: str) -> None:
         from copybot import Target
-        if any(x["key"] == f'{p["ticker"]}|{p["side"]}' for x in self.stats["trades"]):
+        key = f'{p["ticker"]}|{p["side"]}'
+        if any(x["key"] == key for x in self.stats["trades"]):
             return
         bot = self.bot
         eq = bot.equity()
@@ -159,11 +295,12 @@ class LagWatch:
         if not filled:
             return
         px = cost / filled
-        bot.ledger_queue.append(("open", "Lag trade", p["ticker"], p["side"], filled, px, p["title"]))
-        self.stats["trades"].append({"key": f'{p["ticker"]}|{p["side"]}', "ticker": p["ticker"], "side": p["side"],
-                                     "count": filled, "entry": px, "t0": time.time(), "pm_mid": pm_mid,
-                                     "title": p["title"]})
-        log.info("LAGTRADE BUY %d %s %s @ %.2f (Polymarket %.3f)", filled, p["ticker"], p["side"].upper(), px, pm_mid)
+        bot.ledger_queue.append(("open", f"Lag trade · {grp}", p["ticker"], p["side"], filled, px, p["title"]))
+        self.stats["trades"].append({"key": key, "ticker": p["ticker"], "side": p["side"], "count": filled,
+                                     "entry": px, "t0": time.time(), "pm_mid": pm_mid, "title": p["title"],
+                                     "group": grp})
+        log.info("LAGTRADE [%s] BUY %d %s %s @ %.2f (Polymarket %.3f)", grp, filled, p["ticker"],
+                 p["side"].upper(), px, pm_mid)
 
     def _maybe_sell(self, key: str, bid: float, rate: float) -> None:
         from copybot import Target
@@ -173,44 +310,50 @@ class LagWatch:
             filled, proceeds = self.bot._execute(Target(x["ticker"], x["side"]), "sell", x["count"], bid)
             if filled:
                 px = proceeds / filled
-                self.bot.ledger_queue.append(("close", "Lag trade", x["ticker"], x["side"], filled, px, x["title"]))
+                self.bot.ledger_queue.append(("close", f"Lag trade · {x.get('group', '')}", x["ticker"], x["side"],
+                                              filled, px, x["title"]))
                 log.info("LAGTRADE SELL %d %s %s @ %.2f (bought %.2f, +%.1fc each after fees)", filled, x["ticker"],
                          x["side"].upper(), px, x["entry"], 100 * self._net(x["entry"], px, rate))
                 x["count"] -= filled
             if x["count"] <= 0:
                 self.stats["trades"].remove(x)
 
-    def _maybe_switch(self) -> None:
-        st, c = self.stats, self.cfg
-        if st.get("mode") != "watch" or not c.get("auto_switch", True):
+    def _record(self, g: dict) -> None:
+        st, grp = self.stats, self._g(g["group"])
+        st["gaps"] += 1
+        grp["gaps"] += 1
+        if g.get("converged"):
+            st["converged"] += 1
+            grp["converged"] += 1
+        game = g["ticker"].rsplit("-", 1)[0]
+        grp["games"] = list(set(grp.get("games", [])) | {game})[-100:]
+        ex = {"group": g["group"], "title": g["title"][:60], "ticker": g["ticker"], "side": g["side"],
+              "entry": g["entry"], "pm_mid": g["pm_mid"], "max_gap_c": round(100 * g["max_gap"], 1),
+              "secs": g.get("secs"), "converged": bool(g.get("converged")), "at": int(g["t0"])}
+        st["examples"] = (st["examples"] + [ex])[-25:]
+        log.info("LAGWATCH %s", json.dumps(ex))
+        self._maybe_switch(g["group"])
+
+    def _maybe_switch(self, name: str) -> None:
+        g, c = self._g(name), self.cfg
+        if g.get("mode") != "watch" or not c.get("auto_switch", True):
             return
-        n, conv, games = st["gaps"], st["converged"], len(set(st.get("games", [])))
+        n, conv, games = g["gaps"], g["converged"], len(g.get("games", []))
         if (n >= int(c.get("min_gaps", 8)) and conv / max(1, n) >= float(c.get("min_converge_rate", 0.6))
                 and games >= int(c.get("min_games", 3))):
-            st["mode"] = "trade"
-            st["switched_at"] = int(time.time())
-            log.warning("LAGWATCH switched to TRADE mode: %d gaps, %d profitable after fees (%.0f%%), %d games",
-                        n, conv, 100 * conv / n, games)
-
-    def _record(self, g: dict) -> None:
-        self.stats["gaps"] += 1
-        if g.get("converged"):
-            self.stats["converged"] += 1
-        ex = {"title": g["title"][:60], "ticker": g["ticker"], "side": g["side"], "entry": g["entry"],
-              "pm_mid": g["pm_mid"], "max_gap_c": round(100 * g["max_gap"], 1), "secs": g.get("secs"),
-              "converged": bool(g.get("converged")), "at": int(g["t0"])}
-        self.stats["examples"] = (self.stats["examples"] + [ex])[-25:]
-        game = g["ticker"].rsplit("-", 1)[0]
-        self.stats["games"] = (self.stats.get("games", []) + [game])[-200:]
-        log.info("LAGWATCH %s", json.dumps(ex))
-        self._maybe_switch()
+            g["mode"] = "trade"
+            g["switched_at"] = int(time.time())
+            self.stats["mode"] = "trade"  # at least one group trading (dashboard + reserve)
+            log.warning("LAGWATCH [%s] switched to TRADE: %d gaps, %d profitable after fees (%.0f%%), %d games",
+                        name, n, conv, 100 * conv / n, games)
 
     def run(self, stop) -> None:
         every = float(self.cfg.get("poll_seconds", 5))
         while not stop.is_set():
+            t0 = time.time()
             try:
                 if not self.bot.paused:
                     self.tick()
             except Exception as e:
                 log.warning("lagwatch tick failed: %s", e)
-            stop.wait(every)
+            stop.wait(max(0.5, every - (time.time() - t0)))

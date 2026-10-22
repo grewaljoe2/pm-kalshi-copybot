@@ -83,7 +83,10 @@ lag_watch:
   min_converge_rate: 0.6    #   and 60%+ could have been sold for 1c+ profit after both fees
   poll_seconds: 5
   min_gap: 0.03             # Kalshi at least 3c cheaper than Polymarket after the fee
-  max_pairs: 12
+  max_live: 60              # live markets polled every poll_seconds
+  max_pre: 60               # upcoming markets polled every pre_poll_seconds
+  pre_poll_seconds: 30
+  discover_every_s: 600     # re-scan Polymarket's sports list every 10 min
   stake_pct: 0.03           # trade mode: 3% of balance per gap
   max_open_pct: 0.10        # at most 10% of balance in lag trades at once
   reserve_pct: 0.10         # once trading, 10% of balance is kept for lag trades only (whales/parlays can't use it)
