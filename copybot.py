@@ -57,11 +57,15 @@ class State:
     DEFAULT = {"seen": {}, "positions": {}, "spent_by_day": {}, "initialized": [],
                "lots": [], "closed": [], "events": []}
 
+    DISK = Path("/var/data")  # Render persistent disk (survives restarts and deploys)
+
     def __init__(self, path: str):
-        self.path = Path(path)
+        self.path = (self.DISK / "state.json") if self.DISK.is_dir() else Path(path)
+        self.on_disk = self.DISK.is_dir()
         self.db_url = os.environ.get("DATABASE_URL")
         self.data = json.loads(json.dumps(self.DEFAULT))
-        loaded = None
+        loaded = json.loads(self.path.read_text()) if self.path.exists() else None
+        db_data = None
         if self.db_url:
             try:
                 import psycopg
@@ -69,19 +73,46 @@ class State:
                     c.execute("create table if not exists copybot_state "
                               "(id text primary key, data jsonb not null, updated timestamptz default now())")
                     row = c.execute("select data from copybot_state where id='main'").fetchone()
-                    loaded = row[0] if row else None
-                log.info("State: using database")
+                    db_data = row[0] if row else None
+                log.info("State: database reachable (%s)", "has records" if db_data else "empty")
             except Exception as e:
-                log.error("State database unavailable, using local file: %s", e)
-                self.db_url = None
-        if loaded is None and self.path.exists():
-            loaded = json.loads(self.path.read_text())
+                log.error("State database unavailable: %s", e)
+        if loaded is None:
+            loaded = db_data
+            log.info("State: %s", "loaded from database" if db_data else "starting empty")
+        elif db_data and not loaded.get("db_merged_v1"):
+            loaded = self._merge(db_data, loaded)
+            log.warning("State: merged the database's full records with the records made since the outage")
         if loaded:
             self.data.update(loaded)
+        if self.on_disk:
+            self.data["db_merged_v1"] = bool(db_data) or self.data.get("db_merged_v1", False)
+            log.info("State: saving to disk %s", self.path)
+
+    @staticmethod
+    def _merge(old: dict, new: dict) -> dict:
+        """old = full history from the database; new = records made after it went offline."""
+        out = json.loads(json.dumps(old))
+        have = {(l["ticker"], l["side"]) for l in out.get("lots", [])}
+        for l in new.get("lots", []):
+            if (l["ticker"], l["side"]) not in have:
+                out.setdefault("lots", []).append(l)
+        for k in ("closed", "events"):
+            seen = {json.dumps(x, sort_keys=True) for x in out.get(k, [])}
+            out[k] = out.get(k, []) + [x for x in new.get(k, []) if json.dumps(x, sort_keys=True) not in seen]
+        pos = dict(out.get("positions", {}))
+        for key, n in (new.get("positions") or {}).items():
+            pos[key] = max(pos.get(key, 0), n)
+        out["positions"] = pos
+        for w, lst in (new.get("seen") or {}).items():
+            out.setdefault("seen", {}).setdefault(w, [])
+            out["seen"][w] = (out["seen"][w] + [x for x in lst if x not in out["seen"][w]])[-2000:]
+        out["db_merged_v1"] = True
+        return out
 
     def save(self) -> None:
         blob = json.dumps(self.data)
-        if self.db_url:
+        if not self.on_disk and self.db_url:
             try:
                 import psycopg
                 with psycopg.connect(self.db_url, connect_timeout=10) as c:
@@ -2003,9 +2034,20 @@ class CopyBot:
             log.info("COMBO reconcile: Kalshi vs ledger %s (keys %s)", summ, sorted(rows[0].keys())[:14] if rows else [])
         for p in rows:
             tk = p.get("ticker") or ""
+            raw = float(p.get("position_fp") or p.get("position") or 0)
             if not tk.startswith("KXMVE"):
+                # any other position Kalshi holds that our records lost: add it back
+                side, held = ("yes", raw) if raw > 0 else ("no", -raw)
+                have = self.state.position(tk, side)
+                miss = int(held - have)
+                if miss > 0:
+                    cost = float(p.get("market_exposure_dollars") or 0)
+                    px = round(cost / held, 4) if held and cost else 0.5
+                    self.state.add_position(tk, side, miss)
+                    self.state.open_lot("Recovered", tk, side, miss, px, kalshi_fee(miss, px, self.fee_rate), tk)
+                    log.info("RECOVER %d %s %s @ %.3f from Kalshi into the records", miss, tk, side.upper(), px)
                 continue
-            held = float(p.get("position_fp") or p.get("position") or 0)
+            held = raw
             if held <= 0:
                 continue  # we only buy YES on combos
             have = self.state.position(tk, "yes")
