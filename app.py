@@ -298,15 +298,15 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
 <td><b>{{ '%.0f'|format(100*c.hit) }}%</b></td><td>{{ '%.0f¢'|format(100*c.price) if c.price else '—' }}</td><td>${{ '%.2f'|format(c.stake) }}</td><td>${{ c.payout }}</td></tr>{% endfor %}
 </table></div><div class="k" style="margin-top:6px">{% if combos.borrow %}<b>Using idle whale cash: {{ 'yes' if combos.borrow.on else 'no' }}</b> ({{ combos.borrow.why }}). {% endif %}{% for s in combos.slates %}{{ s.league }}: {{ s.legs_used }} of {{ s.legs_available }} strong legs. {% endfor %}One leg per game, each leg in only one combo. Hit chance = the legs' chances multiplied. NBA built daily for tonight, NFL for the upcoming games. LIMIT = waiting at a fair price; TAKE = bought at Kalshi's price.</div>
 {% else %}<div class="k">Built once a day from the props above and the whale picks.</div>{% endif %}</div>
-<div class="card"><h2>Live lag watch (test mode)</h2>
+<div class="card"><h2>Live lag trading — {{ 'TRADING' if (st and st.lagwatch and st.lagwatch.mode == 'trade') else 'watching (auto-switches on evidence)' }}</h2>
 {% set lw = st.lagwatch if st and st.lagwatch else {} %}
 {% if lw %}<div class="grid"><div><div class="k">Live games watched</div><div class="v">{{ lw.pairs_watched or 0 }}</div></div>
 <div><div class="k">Gaps seen</div><div class="v">{{ lw.gaps or 0 }}</div></div>
-<div><div class="k">Kalshi caught up within 60s</div><div class="v">{{ lw.converged or 0 }}</div></div></div>
+<div><div class="k">Profitable after fees within 60s</div><div class="v">{{ lw.converged or 0 }}</div></div></div>
 {% if lw.examples %}<div class="scroll" style="margin-top:8px"><table><tr><th>Game</th><th>Kalshi</th><th>Polymarket</th><th>Gap</th><th>Lasted</th><th>Caught up</th></tr>
 {% for e in lw.examples[::-1][:8] %}<tr><td>{{ e.title }}<br><span class="k">{{ e.ticker }} {{ e.side|upper }}</span></td><td>{{ '%.0f'|format(100*e.entry) }}¢</td><td>{{ '%.0f'|format(100*e.pm_mid) }}¢</td><td>{{ e.max_gap_c }}¢</td><td>{{ e.secs }}s</td><td>{{ 'yes' if e.converged else 'no' }}</td></tr>{% endfor %}
 </table></div>{% endif %}
-<div class="k" style="margin-top:6px">During live games the bot compares Kalshi's price with Polymarket's every 5s. A gap = Kalshi at least 3¢ cheaper after the fee. Measuring only; no trades until the gaps prove real.</div>
+<div class="k" style="margin-top:6px">During live games the bot compares Kalshi's price with Polymarket's every 5s. A gap = Kalshi at least 3¢ cheaper after the fee. Switches to trading by itself after 8+ gaps across 3+ games with 60%+ profitable after both fees. Trading: 3% of balance per gap (max 10% at once), sells once it nets 1¢+ per contract, otherwise holds to settlement.</div>
 {% else %}<div class="k">Starts watching when matched games go live.</div>{% endif %}</div>
 <div class="card"><h2>Today's slate</h2>
 {% if slate %}<div class="grid">

@@ -841,6 +841,7 @@ class CopyBot:
         self.combo_picks: list = []
         self.prop_picks: list = []      # rated player props (props.py), refreshed by the dashboard thread
         self.prop_picks_new = False
+        self.ledger_queue: list = []   # ledger updates from other threads (lag trades), applied in the bot loop
         self.kalshi_link: dict = {"linked": False, "detail": "no API key set"}
 
     # ---- pause switch (persisted, toggled from the dashboard) ------------ #
@@ -854,6 +855,21 @@ class CopyBot:
         log.warning("Bot %s from dashboard", "PAUSED" if value else "RESUMED")
 
     # ---- main loop ------------------------------------------------------- #
+    def _apply_ledger_queue(self) -> None:
+        while self.ledger_queue:
+            op, name, tk, sd, n, px, title = self.ledger_queue.pop(0)
+            fee = kalshi_fee(n, px, self.fee_rate)
+            tgt = Target(tk, sd)
+            if op == "open":
+                self.state.add_position(tk, sd, n)
+                self.state.add_spent(n * px + fee)
+                self.state.open_lot(name, tk, sd, n, px, fee, title)
+                self._journal(name, {"title": title, "outcome": sd, "price": px}, tgt, "buy", n, px)
+            else:
+                self.state.add_position(tk, sd, -n)
+                self.state.sell_lots(tk, sd, n, px, fee)
+                self._journal(name, {"title": title, "outcome": sd, "price": px}, tgt, "sell", n, px)
+
     def check_kalshi_link(self) -> None:
         """Log in to Kalshi with the API key (if set) and read the balance. Works in paper mode too."""
         if not self.kalshi.key_id:
@@ -883,6 +899,7 @@ class CopyBot:
         if self.mode == "live" and self.kalshi_env == "prod":
             log.warning("*** LIVE TRADING WITH REAL MONEY ***")
         while True:
+            self._apply_ledger_queue()
             if self.mode == "live":
                 try:
                     self.balance = self.kalshi.balance_usd()

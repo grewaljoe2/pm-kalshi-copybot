@@ -9,8 +9,11 @@ Kalshi fee plus a margin: buying on Kalshi would be getting the bet below the pr
 bigger market says it's worth. For each gap it records how big it got, how long it lasted,
 and whether Kalshi caught up within a minute (could we have sold for a profit?).
 
-mode "watch" only measures and logs. mode "trade" (not used yet) would buy the gap and sell
-when prices converge; that switch is left for after the numbers prove the gaps are real.
+mode "watch" only measures. With auto_switch on, it flips itself to "trade" once enough gaps
+have shown up across several games and most of them could have been sold for a profit after
+both fees. In "trade" mode it buys the gap on Kalshi (small size) and sells as soon as selling
+nets at least 1c after fees; if Kalshi never catches up it simply holds a bet it bought below
+Polymarket's price until the game settles.
 """
 from __future__ import annotations
 
@@ -45,6 +48,11 @@ class LagWatch:
         st.setdefault("converged", 0)
         st.setdefault("examples", [])
         st.setdefault("pairs_watched", 0)
+        if not st.get("strict_v2"):  # earlier counts used a looser "caught up" test: start fresh
+            st.update(gaps=0, converged=0, examples=[], games=[], strict_v2=True)
+        st.setdefault("mode", self.cfg.get("mode", "watch"))
+        st.setdefault("trades", [])
+        st.setdefault("games", [])
         self.stats = st
 
     # ---- prices ---------------------------------------------------------- #
@@ -104,6 +112,8 @@ class LagWatch:
                                       "t0": now, "entry": k_ask, "pm_mid": round(pm_mid, 3), "max_gap": gap}
                     log.info("LAGWATCH gap open %s %s: Kalshi ask %.2f vs Polymarket %.3f (gap %.1fc)",
                              p["ticker"], p["side"].upper(), k_ask, pm_mid, 100 * gap)
+                    if self.stats.get("mode") == "trade":
+                        self._buy(p, k_ask, pm_mid)
                 else:
                     g["max_gap"] = max(g["max_gap"], gap)
             elif g:
@@ -111,14 +121,76 @@ class LagWatch:
                 g["closed"] = now
                 self.follow.append(g)
                 del self.open[key]
-            # convergence check: within 60s of the gap, could we sell above our entry?
+            # convergence check: within 60s, could we have sold for >= 1c after both fees?
             for f in [f for f in self.follow if f["key"] == key]:
-                if k_bid and k_bid >= f["entry"] + 0.02:
+                if k_bid and self._net(f["entry"], k_bid, rate) >= 0.01:
                     f["converged"] = True
                 if now - f["t0"] > 60 or f.get("converged"):
                     self._record(f)
                     self.follow.remove(f)
+            if self.stats.get("mode") == "trade" and k_bid:
+                self._maybe_sell(key, k_bid, rate)
             time.sleep(0.15)
+        # trades on games that ended are left to settle normally
+        self.stats["trades"] = [x for x in self.stats["trades"] if now - x["t0"] < 5 * 3600]
+
+    @staticmethod
+    def _fee(p: float, rate: float) -> float:
+        return rate * p * (1 - p)
+
+    def _net(self, entry: float, bid: float, rate: float) -> float:
+        """Profit per contract from buying at entry and selling at bid, after both taker fees."""
+        return bid - entry - self._fee(entry, rate) - self._fee(bid, rate)
+
+    # ---- trade mode -------------------------------------------------------- #
+    def _buy(self, p: dict, ask: float, pm_mid: float) -> None:
+        from copybot import Target
+        if any(x["key"] == f'{p["ticker"]}|{p["side"]}' for x in self.stats["trades"]):
+            return
+        bot = self.bot
+        eq = bot.equity()
+        open_cost = sum(x["count"] * x["entry"] for x in self.stats["trades"])
+        stake = min(eq * float(self.cfg.get("stake_pct", 0.03)),
+                    eq * float(self.cfg.get("max_open_pct", 0.10)) - open_cost, bot.cash() - 0.5)
+        n = int(stake // ask) if stake > 0 else 0
+        if n < 1:
+            return
+        filled, cost = bot._execute(Target(p["ticker"], p["side"]), "buy", n, ask)
+        if not filled:
+            return
+        px = cost / filled
+        bot.ledger_queue.append(("open", "Lag trade", p["ticker"], p["side"], filled, px, p["title"]))
+        self.stats["trades"].append({"key": f'{p["ticker"]}|{p["side"]}', "ticker": p["ticker"], "side": p["side"],
+                                     "count": filled, "entry": px, "t0": time.time(), "pm_mid": pm_mid,
+                                     "title": p["title"]})
+        log.info("LAGTRADE BUY %d %s %s @ %.2f (Polymarket %.3f)", filled, p["ticker"], p["side"].upper(), px, pm_mid)
+
+    def _maybe_sell(self, key: str, bid: float, rate: float) -> None:
+        from copybot import Target
+        for x in [x for x in self.stats["trades"] if x["key"] == key]:
+            if self._net(x["entry"], bid, rate) < float(self.cfg.get("min_profit", 0.01)):
+                continue
+            filled, proceeds = self.bot._execute(Target(x["ticker"], x["side"]), "sell", x["count"], bid)
+            if filled:
+                px = proceeds / filled
+                self.bot.ledger_queue.append(("close", "Lag trade", x["ticker"], x["side"], filled, px, x["title"]))
+                log.info("LAGTRADE SELL %d %s %s @ %.2f (bought %.2f, +%.1fc each after fees)", filled, x["ticker"],
+                         x["side"].upper(), px, x["entry"], 100 * self._net(x["entry"], px, rate))
+                x["count"] -= filled
+            if x["count"] <= 0:
+                self.stats["trades"].remove(x)
+
+    def _maybe_switch(self) -> None:
+        st, c = self.stats, self.cfg
+        if st.get("mode") != "watch" or not c.get("auto_switch", True):
+            return
+        n, conv, games = st["gaps"], st["converged"], len(set(st.get("games", [])))
+        if (n >= int(c.get("min_gaps", 8)) and conv / max(1, n) >= float(c.get("min_converge_rate", 0.6))
+                and games >= int(c.get("min_games", 3))):
+            st["mode"] = "trade"
+            st["switched_at"] = int(time.time())
+            log.warning("LAGWATCH switched to TRADE mode: %d gaps, %d profitable after fees (%.0f%%), %d games",
+                        n, conv, 100 * conv / n, games)
 
     def _record(self, g: dict) -> None:
         self.stats["gaps"] += 1
@@ -128,7 +200,10 @@ class LagWatch:
               "pm_mid": g["pm_mid"], "max_gap_c": round(100 * g["max_gap"], 1), "secs": g.get("secs"),
               "converged": bool(g.get("converged")), "at": int(g["t0"])}
         self.stats["examples"] = (self.stats["examples"] + [ex])[-25:]
+        game = g["ticker"].rsplit("-", 1)[0]
+        self.stats["games"] = (self.stats.get("games", []) + [game])[-200:]
         log.info("LAGWATCH %s", json.dumps(ex))
+        self._maybe_switch()
 
     def run(self, stop) -> None:
         every = float(self.cfg.get("poll_seconds", 5))

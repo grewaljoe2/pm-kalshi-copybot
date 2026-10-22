@@ -76,10 +76,17 @@ parlay_lock:
 # Live lag watcher: does Kalshi trail Polymarket's price during games?
 lag_watch:
   enabled: true
-  mode: watch               # watch = measure only. (trade mode comes after the numbers prove out)
+  mode: watch               # starts measuring only; switches itself to trade when the evidence is in
+  auto_switch: true
+  min_gaps: 8               # evidence needed: at least 8 gaps
+  min_games: 3              #   across at least 3 different games
+  min_converge_rate: 0.6    #   and 60%+ could have been sold for 1c+ profit after both fees
   poll_seconds: 5
   min_gap: 0.03             # Kalshi at least 3c cheaper than Polymarket after the fee
   max_pairs: 12
+  stake_pct: 0.03           # trade mode: 3% of balance per gap
+  max_open_pct: 0.10        # at most 10% of balance in lag trades at once
+  min_profit: 0.01          # sell once it nets 1c+ per contract after fees, else hold to settlement
 
 # When buying at Kalshi's ask isn't worth it, rest a post-only limit order at a fair price
 # (maker fees are 0 on most Kalshi markets, at most 1/4 of the taker fee on NFL/NBA).
