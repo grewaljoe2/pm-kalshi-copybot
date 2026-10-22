@@ -61,6 +61,26 @@ live_games:
   max_slippage: 0.0
   size_mult: 0.5
 
+# Following whales during games
+live_moves:
+  follow_hedges: true       # whale buys the other side of a bet we copied -> we sell the same share
+
+# Parlays: once every leg but one has won, sell part to lock in profit
+parlay_lock:
+  enabled: true
+  sell_fraction: 0.5        # sell half, let half ride
+  min_multiple: 2.0         # only if we get at least 2x what we paid
+  min_of_fair: 0.85         # and at least 85% of fair value (the last leg's live price)
+  check_seconds: 120
+
+# Live lag watcher: does Kalshi trail Polymarket's price during games?
+lag_watch:
+  enabled: true
+  mode: watch               # watch = measure only. (trade mode comes after the numbers prove out)
+  poll_seconds: 5
+  min_gap: 0.03             # Kalshi at least 3c cheaper than Polymarket after the fee
+  max_pairs: 12
+
 # When buying at Kalshi's ask isn't worth it, rest a post-only limit order at a fair price
 # (maker fees are 0 on most Kalshi markets, at most 1/4 of the taker fee on NFL/NBA).
 limit_orders:

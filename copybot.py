@@ -240,7 +240,7 @@ class Polymarket:
         hit = self._info_cache.get(condition_id)
         if hit and time.time() - hit[0] < 300:
             return hit[1]
-        info: dict = {"start": None, "prices": {}}
+        info: dict = {"start": None, "prices": {}, "tokens": {}}
         try:
             r = self.s.get("https://gamma-api.polymarket.com/markets",
                            params={"condition_ids": condition_id}, timeout=15)
@@ -263,6 +263,9 @@ class Polymarket:
             outs = json.loads(outs) if isinstance(outs, str) else (outs or [])
             prices = json.loads(prices) if isinstance(prices, str) else (prices or [])
             info["prices"] = {str(o): float(p) for o, p in zip(outs, prices)}
+            toks = m.get("clobTokenIds")
+            toks = json.loads(toks) if isinstance(toks, str) else (toks or [])
+            info["tokens"] = {str(o): str(tk) for o, tk in zip(outs, toks)}
         except Exception as e:
             log.debug("gamma lookup failed: %s", e)
         self._info_cache[condition_id] = (time.time(), info)
@@ -629,6 +632,57 @@ class Kalshi:
             except Exception:
                 pass
 
+    def held(self, ticker: str) -> float:
+        j = self._req("GET", "/portfolio/positions", params={"ticker": ticker, "limit": 5})
+        for p in j.get("market_positions") or []:
+            if p.get("ticker") == ticker:
+                return float(p.get("position_fp") or p.get("position") or 0)
+        return 0.0
+
+    def rfq_sell_yes(self, ticker: str, contracts: int, min_price: float, wait_s: float = 12) -> dict:
+        """Ask market makers for a bid on `contracts` YES we hold; sell (accept the quote's YES
+        bid) if it's >= min_price. Returns {status, price, sold}."""
+        before = self.held(ticker)
+        rfq = self._req("POST", "/communications/rfqs", json={
+            "market_ticker": ticker, "rest_remainder": False, "contracts": int(contracts)})
+        rid = rfq.get("id")
+        out = {"status": "no_quote", "price": None, "sold": 0, "best": None}
+        try:
+            deadline, best = time.time() + wait_s, None
+            while time.time() < deadline:
+                time.sleep(2.0)
+                qs = self._req("GET", "/communications/quotes",
+                               params={"rfq_id": rid, "rfq_user_filter": "self", "limit": 100}).get("quotes") or []
+                for q in qs:
+                    yb = float(q.get("yes_bid_dollars") or 0)
+                    if q.get("status") in (None, "open") and yb > 0 and (best is None or yb > best[0]):
+                        best = (yb, q)
+                if best and best[0] >= min_price:
+                    break
+            if not best:
+                return out
+            out["best"] = best[0]
+            if best[0] < min_price:
+                out["status"] = "too_low"
+                return out
+            self._req("PUT", f"/communications/rfqs/{rid}/quotes/{best[1]['id']}/accept", json={"accepted_side": "yes"})
+            for _ in range(8):
+                time.sleep(1.5)
+                now = self.held(ticker)
+                if now < before:
+                    out.update(status="sold", price=best[0], sold=before - now)
+                    return out
+            out["status"] = "accepted_no_fill"
+            return out
+        except Exception as e:
+            out.update(status="error", error=str(e)[:200])
+            return out
+        finally:
+            try:
+                self._req("DELETE", f"/communications/rfqs/{rid}")
+            except Exception:
+                pass
+
     def create_combo(self, collection_ticker: str, legs: list[dict]) -> dict:
         """legs: [{event_ticker, market_ticker, side}] -> {market_ticker, event_ticker} of the combo."""
         return self._req("POST", f"/multivariate_event_collections/{collection_ticker}",
@@ -856,6 +910,13 @@ class CopyBot:
                     self.check_resting()
                 except Exception as e:
                     log.warning("resting check failed: %s", e)
+            if time.time() - getattr(self, "_last_lockcheck", 0) > float(
+                    (self.cfg.get("parlay_lock", {}) or {}).get("check_seconds", 120)):
+                self._last_lockcheck = time.time()
+                try:
+                    self.check_parlay_locks()
+                except Exception as e:
+                    log.warning("parlay lock check failed: %s", e)
             if time.time() - getattr(self, "_last_reconcile", 0) > 300:
                 self._last_reconcile = time.time()
                 try:
@@ -1003,6 +1064,9 @@ class CopyBot:
         if not tgt:
             return self._skip(t, name, "no Kalshi mapping")
 
+        self._register_pair(t, tgt)
+        if side == "BUY" and self._follow_hedge(addr, name, t, tgt, price, size):
+            return
         if side == "BUY":
             min_usd = whale.get("min_trade_usd", self.risk["min_whale_trade_usd"])
             if usd < min_usd:
@@ -1010,6 +1074,79 @@ class CopyBot:
             self._copy_buy(name, whale, t, tgt, price, usd)
         elif side == "SELL":
             self._copy_sell(addr, name, t, tgt, price, size)
+
+    # ---- pairs (same bet on Polymarket and Kalshi) for the live lag watcher -- #
+    def _register_pair(self, t: dict, tgt: Target) -> None:
+        cond, outc = t.get("conditionId"), t.get("outcome")
+        if not cond or outc is None:
+            return
+        pairs = self.__dict__.setdefault("pairs", {})
+        key = f"{tgt.ticker}|{tgt.side}"
+        if key in pairs:
+            return
+        pairs[key] = {"cond": cond, "outcome": str(outc), "ticker": tgt.ticker, "side": tgt.side,
+                      "title": t.get("title") or "", "added": time.time()}
+        if len(pairs) > 400:
+            for k in sorted(pairs, key=lambda k: pairs[k]["added"])[:100]:
+                pairs.pop(k, None)
+
+    # ---- whale in-game moves ------------------------------------------------ #
+    @staticmethod
+    def _is_winner_ticker(tk: str) -> bool:
+        series = tk.split("-", 1)[0].upper()
+        return series.endswith("GAME") or series.endswith("MATCH") or "MAP" in series
+
+    def _opposite_holding(self, tgt: Target, whale_name: str):
+        """A position we copied from this whale on the other side of the same bet, or None."""
+        base = tgt.ticker.rsplit("-", 1)[0]
+        for lot in self.state.data.get("lots", []):
+            if not str(lot.get("whale", "")).split(" · ")[0] == whale_name.split(" · ")[0]:
+                continue
+            tk, sd = lot["ticker"], lot["side"]
+            same_mkt_other_side = tk == tgt.ticker and sd != tgt.side
+            other_team_same_game = (tk != tgt.ticker and tk.rsplit("-", 1)[0] == base and sd == tgt.side == "yes"
+                                    and self._is_winner_ticker(tk))
+            if (same_mkt_other_side or other_team_same_game) and self.state.position(tk, sd) > 0:
+                return tk, sd
+        return None
+
+    def _follow_hedge(self, addr, name, t, tgt: Target, whale_px, shares) -> bool:
+        """Whale bought the other side of a bet we copied from them = a hedge / partial cash-out.
+        We sell the same share of our position (one fee) instead of buying the other side."""
+        lc = self.cfg.get("live_moves", {}) or {}
+        if not lc.get("follow_hedges", True):
+            return False
+        hit = self._opposite_holding(tgt, name)
+        if not hit:
+            return False
+        tk, sd = hit
+        held = self.state.position(tk, sd)
+        try:  # whale's shares still on the original side of this market
+            r = self.pm.s.get(f"{POLY_DATA}/positions", params={"user": addr, "market": t.get("conditionId", ""),
+                                                                "sizeThreshold": 0}, timeout=15)
+            pos = [p for p in (r.json() or []) if str(p.get("outcome", "")).lower() != str(t.get("outcome", "")).lower()]
+            orig = max((float(p.get("size") or 0) for p in pos), default=0.0)
+        except Exception:
+            orig = 0.0
+        frac = 1.0 if orig <= 0 else min(1.0, shares / (orig + shares))
+        count = max(1, math.floor(held * frac))
+        try:
+            m = self.kdata.market(tk)
+        except Exception:
+            return False
+        bid = _px(m, f"{sd}_bid")
+        log.info("  HEDGE: %s bought the other side (%s, %.0f sh vs %.0f held) -> sell %d/%d of %s %s",
+                 name, t.get("outcome"), shares, orig, count, held, tk, sd.upper())
+        if not bid:
+            self._skip(t, name, "hedge: no bid on Kalshi to sell into")
+            return True
+        filled, proceeds = self._execute(Target(tk, sd), "sell", count, bid)
+        if filled:
+            px = proceeds / filled
+            self.state.add_position(tk, sd, -filled)
+            self.state.sell_lots(tk, sd, filled, px, kalshi_fee(filled, px, self.fee_rate))
+            self._journal(f"{name} · hedge", t, Target(tk, sd), "sell", filled, px)
+        return True
 
     def _copy_buy(self, name, whale, t, tgt: Target, whale_px, whale_usd) -> None:
         r = self.risk
@@ -1101,13 +1238,25 @@ class CopyBot:
         rate = float(lim.get("maker_fee_rate", 0.0175))
         key = f"{tgt.ticker}|{tgt.side}"
         resting = self.state.data.setdefault("resting", [])
-        if any(f'{x["ticker"]}|{x["side"]}' == key for x in resting):
-            return self._skip(t, name, "limit order already resting on this market")
         price = math.floor(min(fair_px + 0.02, ask - 0.01) * 100) / 100
         while price >= 0.05 and expected_value(fair_px, price, stats, rate) < self.bank.get("min_ev", 0.0):
             price = round(price - 0.01, 2)
         if price < 0.05 or price > self.risk["max_entry_price"] or fair_px - price > 0.08:
             return self._skip(t, name, "no fair limit price")
+        old = [x for x in resting if f'{x["ticker"]}|{x["side"]}' == key]
+        if old:
+            if all(abs(x["price"] - price) < 0.01 for x in old):
+                return self._skip(t, name, "limit order already resting at this price")
+            # whale added at a new price: move our waiting order to the new fair price
+            for x in old:
+                if self.mode == "live" and not str(x["id"]).startswith("paper-"):
+                    try:
+                        self.kalshi.cancel_order(x["id"], x["ticker"])
+                    except Exception as e:
+                        log.warning("  reprice cancel failed: %s", e)
+                        return self._skip(t, name, "limit order already resting (reprice failed)")
+            resting[:] = [x for x in resting if f'{x["ticker"]}|{x["side"]}' != key]
+            log.info("  REPRICE limit %s %s: %.2f -> %.2f", tgt.ticker, tgt.side.upper(), old[0]["price"], price)
         sc = score_bet(whale_px=fair_px, ask=price, whale_usd=whale_usd, stats=stats,
                        same=same, opposite=opp, rate=rate)
         held_usd = self.state.position(tgt.ticker, tgt.side) * price
@@ -1377,6 +1526,7 @@ class CopyBot:
                     continue
                 log.info("[%s] CATCH-UP open bet %s '%s' $%.0f now %.0fc", name, out, t["title"], value, 100 * cur)
                 before = (len(self.state.data["lots"]), len(self.state.data.get("resting", [])))
+                self._register_pair(t, tgt)
                 self._copy_buy(name, whale, t, tgt, cur, value)
                 if (len(self.state.data["lots"]), len(self.state.data.get("resting", []))) != before:
                     done[key] = time.time()
@@ -1617,6 +1767,81 @@ class CopyBot:
                             "borrow": getattr(self, "combo_borrow", {}),
                             "combos": [r | {"league": s["league"]} for s in slates for r in s["combos"]]}
 
+    def check_parlay_locks(self) -> None:
+        """Lock in part of a parlay once every leg but one has won: sell a share of it if the
+        price we can get is close to its fair value (the last leg's live price) and at least a
+        set multiple of what we paid."""
+        pc = self.cfg.get("parlay_lock", {}) or {}
+        if not pc.get("enabled", True) or self.mode != "live" or not self.kalshi.pkey:
+            return
+        lots = [l for l in self.state.data.get("lots", []) if str(l.get("whale", "")).startswith("Combo")
+                and l.get("count", 0) > 0 and not l.get("locked")]
+        for tk in sorted({l["ticker"] for l in lots}):
+            held = self.state.position(tk, "yes")
+            if held < 2:
+                continue
+            mine = [l for l in lots if l["ticker"] == tk]
+            entry = sum(l["cost"] for l in mine) / max(1, sum(l["count"] for l in mine))
+            try:
+                cm = self.kalshi.market(tk)
+            except Exception:
+                continue
+            legs = cm.get("mve_selected_legs") or cm.get("selected_legs") or []
+            if not legs:
+                if not getattr(self, "_legs_warned", False):
+                    self._legs_warned = True
+                    log.info("PARLAY lock: combo market has no legs field (keys %s)", sorted(cm.keys())[:30])
+                continue
+            won, pending, lost = 0, [], False
+            for lg in legs:
+                ltk = lg.get("market_ticker") or lg.get("ticker")
+                lside = (lg.get("side") or "yes").lower()
+                try:
+                    lm = self.kdata.market(ltk)
+                except Exception:
+                    pending.append(None)
+                    continue
+                res = (lm.get("result") or "").lower()
+                if res in ("yes", "no"):
+                    if res == lside:
+                        won += 1
+                    else:
+                        lost = True
+                else:
+                    pending.append((lm, lside))
+            if lost or len(pending) != 1 or pending[0] is None:
+                continue
+            lm, lside = pending[0]
+            lb, la = _px(lm, f"{lside}_bid"), _px(lm, f"{lside}_ask")
+            if not lb or not la:
+                continue
+            fair = (lb + la) / 2  # value of the parlay now = chance the last leg hits
+            min_px = max(fair * float(pc.get("min_of_fair", 0.85)), entry * float(pc.get("min_multiple", 2.0)))
+            n = int(held * float(pc.get("sell_fraction", 0.5)))
+            if n < 1 or min_px >= 0.99:
+                continue
+            sold, px = 0, None
+            book_bid = _px(cm, "yes_bid")
+            if book_bid and book_bid >= min_px:
+                f, proceeds = self._execute(Target(tk, "yes"), "sell", n, book_bid)
+                sold, px = f, (proceeds / f if f else None)
+            else:
+                q = self.kalshi.rfq_sell_yes(tk, n, min_px)
+                if q["status"] == "sold":
+                    sold, px = int(q["sold"]), q["price"]
+                log.info("PARLAY lock %s: last leg %.0f%%, entry %.2f, need >= %.2f -> quote %s (%s)",
+                         tk, 100 * fair, entry, min_px, q.get("best"), q["status"])
+            if sold and px:
+                self.state.add_position(tk, "yes", -sold)
+                self.state.sell_lots(tk, "yes", sold, px, kalshi_fee(sold, px, self.fee_rate))
+                self._journal("Combo lock-in", {"title": mine[0].get("title"), "outcome": "combo", "price": fair},
+                              Target(tk, "yes"), "sell", sold, px)
+                for l in self.state.data.get("lots", []):
+                    if l["ticker"] == tk:
+                        l["locked"] = True
+                log.info("PARLAY LOCKED %s: sold %d @ %.2f (paid %.2f), keeping %d riding", tk, sold, px, entry,
+                         self.state.position(tk, "yes"))
+
     def reconcile_combos(self) -> None:
         """Make the ledger match Kalshi for combo markets: record combo contracts bought through
         quotes that the ledger missed, and cancel a waiting limit order if that combo is already held."""
@@ -1826,6 +2051,7 @@ class CopyBot:
             "cash": round(self.cash(), 2),
             "start_usd": float(self.bank.get("start_usd", 100)),
             "stage": self.current_stage().get("name"),
+            "lagwatch": self.state.data.get("lagwatch") or {},
             "stage_tiers": self.current_tiers(),
             "peak": self.state.data.get("peak_equity"),
             "sizing": self.risk.get("sizing"),
