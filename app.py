@@ -85,6 +85,16 @@ def _lots_audit():
             row["title"] = (row.get("title") or "")[:140]
             log.info("LOTS_AUDIT %s", json.dumps(row))
         log.info("LOTS_AUDIT done: %d lots, cash %.2f", len(lots), BOT.cash() if BOT else 0)
+        try:
+            bal = BOT.kalshi._req("GET", "/portfolio/balance")
+            orders = BOT.kalshi._req("GET", "/portfolio/orders", params={"status": "resting", "limit": 200}).get("orders") or []
+            held = sum(float(o.get("remaining_count_fp") or o.get("remaining_count") or 0) *
+                       float(o.get("yes_price_dollars") if o.get("side") == "yes" else o.get("no_price_dollars") or 0)
+                       for o in orders)
+            log.info("BALANCE_AUDIT kalshi balance %s | %d resting orders worth $%.2f | ledger resting %d",
+                     json.dumps(bal)[:400], len(orders), held, len(BOT.state.data.get("resting", [])))
+        except Exception as e:
+            log.warning("balance audit failed: %s", e)
     except Exception as e:
         log.warning("lots audit failed: %s", e)
 
