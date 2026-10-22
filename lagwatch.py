@@ -550,7 +550,8 @@ class LagWatch:
                 bid = yes_bid if x["side"] == "yes" else 1 - yes_ask
                 if bid < 0.02:
                     continue
-                if fair < exit_below or bid >= fair:
+                floor = float(self.cfg.get("exit_min_bid_share", 0.75))
+                if bid >= fair or (fair < exit_below and bid >= floor * fair):  # never dump far below value
                     self._sell(x, bid, rate, f"(late exit: worth {fair:.2f}, bid {bid:.2f})")
 
     def _maybe_sell(self, key: str, bid: float, rate: float, fair: float | None = None) -> None:
