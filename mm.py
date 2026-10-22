@@ -109,9 +109,20 @@ class MarketMaker:
         except Exception as e:
             log.warning("MM orphan check failed: %s", e)
 
+    def status(self, now: float) -> None:
+        if now - getattr(self, "_last_status", 0) < 60:
+            return
+        self._last_status = now
+        quotes = {tk[-14:]: {sd: o["price"] for sd, o in st["orders"].items()} for tk, st in self.mk.items() if st["orders"]}
+        inv = {tk[-14:]: (st["inv"]["yes"][0], st["inv"]["no"][0]) for tk, st in self.mk.items()
+               if st["inv"]["yes"][0] or st["inv"]["no"][0]}
+        log.info("MM status: quotes %s | holding (YES, NO) %s | gate %s | today $%.2f", quotes, inv,
+                 getattr(self, "_last_gate", {}), self.daily_pnl())
+
     def step(self, tk: str, m: dict, fair: float, q: dict, now: float) -> None:
         if self.bot.mode != "live" or not self.bot.kalshi.pkey:
             return
+        self.status(now)
         if not self._cleaned:
             self.cleanup_orphans()
         st = self.mk.setdefault(tk, {"orders": {}, "inv": {"yes": [0, 0.0], "no": [0, 0.0]}, "last_poll": 0.0,
@@ -124,6 +135,7 @@ class MarketMaker:
         inv_y, inv_n = st["inv"]["yes"][0], st["inv"]["no"][0]
         net = inv_y - inv_n
         allow_y, allow_n, why = self.gate(m, fair, now)
+        self.__dict__.setdefault("_last_gate", {})[st["coin"]] = why or f"ok fair {fair:.2f}"
         stopped = self.daily_pnl() < -float(c.get("daily_stop_usd", 8))
         if stopped:
             allow_y = allow_n = False
@@ -183,6 +195,9 @@ class MarketMaker:
         if not oid:
             return
         st["orders"][side] = {"id": oid, "price": px, "count": n, "remaining": n, "filled": 0, "t": time.time()}
+        if not getattr(self, "_logged_first", False):
+            self._logged_first = True
+            log.info("MM first quote live: %s %s x%d @ %.2f", tk, side.upper(), n, px)
 
     def _cancel(self, tk, st, side, why) -> None:
         o = st["orders"].get(side)
