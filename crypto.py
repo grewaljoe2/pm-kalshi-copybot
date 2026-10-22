@@ -210,9 +210,10 @@ class CryptoLag:
             # YES side and NO side
             for side, fair, ask, bid in (("yes", fy, q["yes_ask"], q["yes_bid"]),
                                          ("no", 1 - fy, 1 - q["yes_bid"], 1 - q["yes_ask"])):
-                if not (0.05 <= ask <= 0.95):
+                lo = float(self.cfg.get("min_price", 0.10))  # the model is least reliable on longshots
+                if not (lo <= ask <= 1 - lo):
                     continue
-                p = {"ticker": tk, "side": side, "title": m["title"], "start": m.get("open")}
+                p = {"ticker": tk, "side": side, "title": m["title"], "start": m.get("open"), "close": m["close"]}
                 self.lw.check_external(p, grp, fair, ask, bid, now, rate, margin, window=min(60, m["close"] - now))
 
     def run(self, stop) -> None:

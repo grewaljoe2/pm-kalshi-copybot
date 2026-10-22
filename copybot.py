@@ -561,10 +561,19 @@ class Kalshi:
             res = self._req("POST", "/portfolio/events/orders", json=body)
         filled = float(res.get("fill_count") or 0)
         remaining = float(res.get("remaining_count") or 0)
+        avg = res.get("average_fill_price")
+        try:  # V2 reports prices on the YES leg: turn it into the price of the side we traded
+            avg = float(avg) if avg not in (None, "") else None
+            if avg is not None and avg > 1:
+                avg /= 100
+            if avg is not None and side == "no":
+                avg = round(1 - avg, 4)
+        except (TypeError, ValueError):
+            avg = None
         status = "executed" if remaining <= 0 and filled > 0 else (
             "resting" if body["time_in_force"] == "good_till_canceled" and remaining > 0 else "canceled")
         return {"order_id": res.get("order_id"), "fill_count": filled, "remaining_count": remaining,
-                "status": status, "average_fill_price": res.get("average_fill_price"),
+                "status": status, "average_fill_price": avg, "average_fill_price_yes_leg": res.get("average_fill_price"),
                 "average_fee_paid": res.get("average_fee_paid"), "raw": res}
 
     def get_order(self, order_id: str) -> dict:

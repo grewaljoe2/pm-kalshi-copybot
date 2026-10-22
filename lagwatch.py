@@ -84,6 +84,18 @@ class LagWatch:
             st["crypto_reset_v1"] = True
             st["groups"] = {k: v for k, v in st.get("groups", {}).items() if k.split(" ")[0] not in ("BTC", "ETH")}
         self.stats = st
+        if not st.get("no_price_fix_v1"):
+            st["no_price_fix_v1"] = True
+            data = bot.state.data
+            for rec in data.get("closed", []) + data.get("lots", []):
+                if str(rec.get("whale", "")).startswith("Lag trade") and rec.get("side") == "no" and rec.get("count"):
+                    rec["cost"] = round(rec["count"] - rec["cost"], 4)  # count x (1 - yes-leg price)
+                    if "proceeds" in rec:
+                        rec["pnl"] = round(rec["proceeds"] - rec["cost"] - rec.get("fees", 0), 4)
+            for x in st.get("trades", []):
+                if x.get("side") == "no":
+                    x["entry"] = round(1 - x["entry"], 4)
+            log.warning("LAGWATCH corrected lag NO trades recorded at the YES-leg price")
         for name in list(st["groups"]):  # settings may have changed: re-check every league now
             self._maybe_switch(name)
 
@@ -296,7 +308,7 @@ class LagWatch:
             b, m = books.get(p["token"]), kms.get(p["ticker"])
             if b and (m or (self.ks and self.ks.quote(p["ticker"]))):
                 self._check(p, is_live, b, m, now)
-        self.stats["trades"] = [x for x in self.stats["trades"] if now - x["t0"] < 18 * 3600]
+        self.prune_trades(now)
 
     def _k_quote(self, p: dict, m: dict | None) -> tuple:
         """Kalshi ask/bid for this side: live stream first, market listing as fallback."""
@@ -422,7 +434,7 @@ class LagWatch:
         bot.ledger_queue.append(("open", f"Lag trade · {grp}", p["ticker"], p["side"], filled, px, p["title"]))
         self.stats["trades"].append({"key": key, "ticker": p["ticker"], "side": p["side"], "count": filled,
                                      "entry": px, "t0": time.time(), "pm_mid": pm_mid, "title": p["title"],
-                                     "group": grp})
+                                     "group": grp, "close": p.get("close")})
         log.info("LAGTRADE [%s] BUY %d %s %s @ %.2f (Polymarket %.3f)", grp, filled, p["ticker"],
                  p["side"].upper(), px, pm_mid)
 
@@ -441,6 +453,17 @@ class LagWatch:
                 x["count"] -= filled
             if x["count"] <= 0:
                 self.stats["trades"].remove(x)
+
+    def prune_trades(self, now: float) -> None:
+        """Forget lag trades whose market has closed (held to settlement): the settlement itself is
+        booked by the main ledger. Otherwise they keep counting against the lag money cap."""
+        def done(x):
+            if x.get("close"):
+                return now > float(x["close"]) + 60
+            crypto = x["ticker"].startswith(("KXBTC15M", "KXETH15M", "KXBTCD", "KXETHD"))
+            return now - x["t0"] > (75 * 60 if crypto else 18 * 3600)
+        with self.lock:
+            self.stats["trades"] = [x for x in self.stats["trades"] if not done(x)]
 
     def _record(self, g: dict) -> None:
         st, grp = self.stats, self._g(g["group"])
