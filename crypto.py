@@ -66,7 +66,7 @@ class CoinStream:
             for p in self.products:
                 if p in (d.get("var") or {}):
                     self.var[p] = float(d["var"][p])
-                    self.since[p] = time.time() - self.WARMUP - 1
+                    self.since[p] = time.time() - self.WARMUP_S - 1
                     for s, px in (d.get("hist") or {}).get(p, [])[-900:]:
                         self.hist[p].append((int(s), float(px)))
             log.info("CRYPTO model restored from %.0fs ago: %s", time.time() - os.path.getmtime(self.SAVE),
