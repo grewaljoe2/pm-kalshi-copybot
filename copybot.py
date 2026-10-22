@@ -949,7 +949,13 @@ class CopyBot:
             self._apply_ledger_queue()
             if self.mode == "live":
                 try:
+                    old = self.balance
                     self.balance = self.kalshi.balance_usd()
+                    if old is None or abs(self.balance - old) >= 5:
+                        log.info("BALANCE cash $%.2f (was %s): main free $%.2f, reserve ready $%.2f, "
+                                 "future pot free $%.2f, equity $%.2f", self.balance,
+                                 "?" if old is None else f"${old:.2f}", max(0.0, self.spendable_cash()),
+                                 self.reserve_free(), self.pot_free(), self.equity())
                 except Exception as e:
                     self.last_error = f"balance: {e}"
             for addr, w in self.whales.items():
