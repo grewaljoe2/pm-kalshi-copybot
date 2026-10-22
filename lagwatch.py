@@ -309,6 +309,12 @@ class LagWatch:
             if b and (m or (self.ks and self.ks.quote(p["ticker"]))):
                 self._check(p, is_live, b, m, now)
         self.prune_trades(now)
+        if now - getattr(self, "_last_shadow", 0) > 60:
+            self._last_shadow = now
+            try:
+                self.settle_shadows(now)
+            except Exception as e:
+                log.warning("lag shadow check failed: %s", e)
 
     def _k_quote(self, p: dict, m: dict | None) -> tuple:
         """Kalshi ask/bid for this side: live stream first, market listing as fallback."""
@@ -385,6 +391,7 @@ class LagWatch:
                     self.follow.remove(f)
             if k_bid:
                 self._maybe_sell(key, k_bid, rate)
+                self.shadow_bid(key, k_bid, now)
 
     @staticmethod
     def _fee(p: float, rate: float) -> float:
@@ -493,6 +500,7 @@ class LagWatch:
                                           filled, px, x["title"]))
             log.info("LAGTRADE SELL %d %s %s @ %.2f (bought %.2f, %+.1fc each after fees) %s", filled, x["ticker"],
                      x["side"].upper(), px, x["entry"], 100 * self._net(x["entry"], px, rate), why)
+            self._add_shadow(x, px, filled)
             x["count"] -= filled
         if x["count"] <= 0 and x in self.stats["trades"]:
             self.stats["trades"].remove(x)
@@ -522,9 +530,59 @@ class LagWatch:
                                               filled, px, x["title"]))
                 log.info("LAGTRADE SELL %d %s %s @ %.2f (bought %.2f, +%.1fc each after fees)", filled, x["ticker"],
                          x["side"].upper(), px, x["entry"], 100 * self._net(x["entry"], px, rate))
+                self._add_shadow(x, px, filled)
                 x["count"] -= filled
             if x["count"] <= 0:
                 self.stats["trades"].remove(x)
+
+    # ---- "what if we had held?" records ------------------------------------------ #
+    def _add_shadow(self, x: dict, sold: float, n: int) -> None:
+        if not x.get("close"):
+            return  # only crypto windows (known close time) are tracked
+        sh = self.stats.setdefault("shadow", [])
+        sh.append({"key": x["key"], "ticker": x["ticker"], "side": x["side"], "group": x.get("group"),
+                   "entry": x["entry"], "sold": sold, "count": n, "close": x["close"], "t_sell": int(time.time()),
+                   "max_bid": sold, "bid_late": None})
+        del sh[:-300]
+
+    def shadow_bid(self, key: str, bid: float, now: float) -> None:
+        for s in self.stats.get("shadow", []):  # what a sold trade would have been worth if kept
+            if s["key"] == key:
+                s["max_bid"] = max(s.get("max_bid", 0), bid)
+                if s.get("close") and s["close"] - now <= 120 and s.get("bid_late") is None:
+                    s["bid_late"] = bid
+
+    def settle_shadows(self, now: float) -> None:
+        """After a window settles: compare what we made (quick flip) with holding to the end, and with
+        a 'lock in 2 minutes before close' exit. Logged per trade and kept for the daily report."""
+        rate = getattr(self.bot, "fee_rate", 0.07)
+        done = self.stats.setdefault("shadow_done", [])
+        keep = []
+        for s in self.stats.get("shadow", []):
+            if now < s["close"] + 180:
+                keep.append(s)
+                continue
+            try:
+                res = (self.bot.kdata.market(s["ticker"]).get("result") or "").lower()
+            except Exception:
+                res = ""
+            if res not in ("yes", "no"):
+                if now < s["close"] + 3600:
+                    keep.append(s)
+                continue
+            e, n = s["entry"], s["count"]
+            flip = n * self._net(e, s["sold"], rate)
+            hold = n * ((1.0 if res == s["side"] else 0.0) - e - self._fee(e, rate))
+            late = s.get("bid_late")
+            lock = n * self._net(e, late, rate) if late is not None else hold
+            best = n * self._net(e, s.get("max_bid", s["sold"]), rate)
+            rec = {"ticker": s["ticker"], "side": s["side"], "group": s.get("group"), "n": n, "entry": e,
+                   "sold": s["sold"], "result": res, "flip": round(flip, 2), "hold": round(hold, 2),
+                   "lock_2min": round(lock, 2), "best_possible": round(best, 2), "day": time.strftime("%Y-%m-%d")}
+            done.append(rec)
+            log.info("LAG_SHADOW %s", json.dumps(rec))
+        del done[:-1000]
+        self.stats["shadow"] = keep
 
     def prune_trades(self, now: float) -> None:
         """Forget lag trades whose market has closed (held to settlement): the settlement itself is

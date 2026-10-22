@@ -218,6 +218,7 @@ class CryptoLag:
             # YES side and NO side
             for side, fair, ask, bid in (("yes", fy, q["yes_ask"], q["yes_bid"]),
                                          ("no", 1 - fy, 1 - q["yes_bid"], 1 - q["yes_ask"])):
+                self.lw.shadow_bid(f"{tk}|{side}", bid, now)  # keep tracking sold trades at any price
                 lo = float(self.cfg.get("min_price", 0.10))  # the model is least reliable on longshots
                 if not (lo <= ask <= 1 - lo):
                     continue

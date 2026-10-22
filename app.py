@@ -135,6 +135,42 @@ def _mem_watch():
 _register("mem-watch", _mem_watch)
 
 
+def _lag_review():
+    """Today's closed lag trades: what we made vs holding each one to settlement."""
+    import json
+    time.sleep(150)
+    try:
+        rate = getattr(BOT, "fee_rate", 0.07)
+        fee = lambda p: rate * p * (1 - p)
+        res, rows = {}, []
+        since = time.time() - 24 * 3600
+        for c in BOT.state.data.get("closed", []):
+            if not str(c.get("whale", "")).startswith("Lag trade") or c.get("closed", 0) < since:
+                continue
+            tk = c["ticker"]
+            if tk not in res:
+                try:
+                    res[tk] = (BOT.kdata.market(tk).get("result") or "").lower()
+                except Exception:
+                    res[tk] = ""
+            r = res[tk]
+            if r not in ("yes", "no") or not c.get("count"):
+                continue
+            n, e = c["count"], c["cost"] / c["count"]
+            hold = n * ((1.0 if r == c["side"] else 0.0) - e - fee(e))
+            rows.append({"ticker": tk, "side": c["side"], "n": n, "entry": round(e, 3), "how": c.get("how"),
+                         "actual": round(c["pnl"], 2), "hold": round(hold, 2), "result": r})
+        for r in rows:
+            log.info("LAG_REVIEW %s", json.dumps(r))
+        log.info("LAG_REVIEW_TOTAL %s", json.dumps({"trades": len(rows), "actual": round(sum(r["actual"] for r in rows), 2),
+                                                     "hold_to_settle": round(sum(r["hold"] for r in rows), 2)}))
+    except Exception as e:
+        log.warning("lag review failed: %s", e)
+
+
+_register("lag-review", _lag_review)
+
+
 def _strategy(whale: str) -> str:
     w = str(whale or "")
     if w.startswith("Lag trade"):
