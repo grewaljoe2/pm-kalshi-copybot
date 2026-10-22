@@ -1018,7 +1018,7 @@ class CopyBot:
                                  self.reserve_free(), self.pot_free(), self.equity())
                 except Exception as e:
                     self.last_error = f"balance: {e}"
-            for addr, w in self.whales.items():
+            for addr, w in list(self.whales.items()):
                 try:
                     self.poll_wallet(addr, w)
                 except Exception as e:  # keep running on transient errors
