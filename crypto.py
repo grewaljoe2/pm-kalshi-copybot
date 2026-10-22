@@ -159,6 +159,8 @@ class CryptoLag:
         self.coins = CoinStream(tuple(sorted({p for p, _ in SERIES.values()}))).start()
         from mm import MarketMaker
         self.mm = MarketMaker(bot, self, (self.cfg.get("mm") or {}))
+        if self.ks is not None:
+            self.ks.__dict__.setdefault("fill_handlers", []).append(self.mm.on_ws_fill)
         bot.mm = self.mm
         self.markets: dict[str, dict] = {}
         self._last_disc = 0.0

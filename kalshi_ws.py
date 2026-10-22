@@ -210,6 +210,11 @@ class KalshiStream:
         log.info("Kalshi live stream connected (%d markets to watch)", len(self.wanted))
         self._subscribe(sorted(self.wanted))
         self._subscribe_books(sorted(self.book_wanted))
+        try:  # our own fills, pushed the moment they happen (every order, even ones the bot lost track of)
+            self._id += 1
+            ws.send(json.dumps({"id": self._id, "cmd": "subscribe", "params": {"channels": ["fill"]}}))
+        except Exception as e:
+            log.warning("kalshi ws fill subscribe failed: %s", e)
 
     def _on_message(self, ws, raw):
         try:
@@ -224,6 +229,16 @@ class KalshiStream:
                 self._logged_book = True
                 log.info("KALSHI_BOOK first message: %s", raw[:300] if isinstance(raw, str) else str(raw)[:300])
             self._on_book(j)
+            return
+        if j.get("type") == "fill":
+            if not getattr(self, "_logged_fill", False):
+                self._logged_fill = True
+                log.info("KALSHI_FILL first message: %s", raw[:400] if isinstance(raw, str) else str(raw)[:400])
+            for cb in list(getattr(self, "fill_handlers", [])):
+                try:
+                    cb(j.get("msg") or {})
+                except Exception as e:
+                    log.warning("fill handler failed: %s", e)
             return
         if j.get("type") != "ticker":
             return

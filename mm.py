@@ -156,12 +156,44 @@ class MarketMaker:
         except Exception as e:
             log.warning("MM orphan check failed: %s", e)
 
+    def on_ws_fill(self, f: dict) -> None:
+        """Live fill feed: a fill on one of our market-maker markets from an order this run isn't tracking
+        (a quote left over from a restart, or a cancel that didn't take) goes straight into the records."""
+        tk, oid = f.get("market_ticker") or f.get("ticker") or "", f.get("order_id")
+        if not self.covers(tk):
+            return
+        known = self.__dict__.setdefault("_known", {})
+        for k in [k for k, t in known.items() if time.time() - t > 1800]:
+            known.pop(k, None)
+        if oid in known:
+            return  # our tracked quote: the normal order poll books it
+        n = int(float(f.get("count_fp") or f.get("count") or 0))
+        if n <= 0:
+            return
+        side, action = (f.get("side") or "yes").lower(), (f.get("action") or "buy").lower()
+        def px_of(sd):
+            v = f.get(f"{sd}_price_dollars")
+            return float(v) if v is not None else float(f.get(f"{sd}_price") or 0) / 100
+        if action == "buy":
+            held, px = side, px_of(side)
+        else:  # selling one side = buying the other
+            held = "no" if side == "yes" else "yes"
+            px = 1 - px_of(side)
+        coin = tk[2:].split("15M")[0]
+        self.bot.ledger_queue.append(("open", f"MM · {coin} 15m", tk, held, n, round(px, 4), f"{coin} 15m (stray fill)"))
+        self._stray = getattr(self, "_stray", 0) + 1
+        log.warning("MM STRAY FILL %s %s x%d @ %.2f (order %s not tracked) -> booked, exits will manage it",
+                    tk, held.upper(), n, px, oid)
+
     def sweep(self, now: float) -> None:
         """Every 20s: any resting order of ours on a market-maker market that we aren't tracking (a cancel
         that didn't really go through, or a quote left from a restart) gets cancelled and checked."""
         if now - getattr(self, "_last_sweep", 0) < 20:
             return
         self._last_sweep = now
+        if now - getattr(self, "_last_pos", 0) >= 60:
+            self._last_pos = now
+            self.check_positions()
         try:
             tracked = {o["id"] for st in self.mk.values() for o in st.get("orders", {}).values()}
             j = self.bot.kalshi._req("GET", "/portfolio/orders", params={"status": "resting", "limit": 200})
@@ -176,6 +208,40 @@ class MarketMaker:
                     log.warning("MM sweep cancel failed %s: %s", oid, str(e)[:120])
         except Exception as e:
             log.warning("MM sweep failed: %s", str(e)[:120])
+
+    def check_positions(self) -> None:
+        """Every minute: Kalshi's position on each market-maker market vs our records. A difference seen
+        twice in a row (not just a fill still on its way) is booked so the exits can manage it."""
+        if self.bot.ledger_queue:
+            return
+        try:
+            j = self.bot.kalshi._req("GET", "/portfolio/positions", params={"limit": 200, "settlement_status": "unsettled"})
+        except Exception as e:
+            log.warning("MM position check failed: %s", str(e)[:120])
+            return
+        seen = self.__dict__.setdefault("_mismatch", {})
+        now_bad = {}
+        for r in j.get("market_positions") or []:
+            tk = r.get("ticker") or ""
+            if not self.covers(tk):
+                continue
+            k_net = float(r.get("position_fp") or r.get("position") or 0)
+            mine = self.bot.state.position(tk, "yes") - self.bot.state.position(tk, "no")
+            d = int(round(k_net - mine))
+            if d == 0:
+                continue
+            now_bad[tk] = d
+            if seen.get(tk) != d:
+                log.info("MM position check %s: Kalshi %+d vs records %+d (checking again in 1 min)", tk, k_net, mine)
+                continue
+            held = "yes" if d > 0 else "no"
+            expo = float(r.get("market_exposure_dollars") or 0)
+            px = round(expo / abs(k_net), 4) if k_net and expo and (k_net > 0) == (d > 0) else 0.5
+            coin = tk[2:].split("15M")[0]
+            self.bot.ledger_queue.append(("open", f"MM · {coin} 15m", tk, held, abs(d), px, f"{coin} 15m (found on Kalshi)"))
+            log.warning("MM POSITION FIX %s: booked %s x%d @ %.2f so records match Kalshi (%+d)", tk, held.upper(), abs(d), px, k_net)
+            now_bad.pop(tk)
+        self._mismatch = now_bad
 
     def status(self, now: float) -> None:
         if now - getattr(self, "_last_status", 0) < 60:
@@ -342,6 +408,7 @@ class MarketMaker:
         if not oid:
             return
         st["orders"][side] = {"id": oid, "price": px, "count": n, "remaining": n, "filled": 0, "t": time.time()}
+        self.__dict__.setdefault("_known", {})[oid] = time.time()
         if not getattr(self, "_logged_first", False):
             self._logged_first = True
             log.info("MM first quote live: %s %s x%d @ %.2f", tk, side.upper(), n, px)
