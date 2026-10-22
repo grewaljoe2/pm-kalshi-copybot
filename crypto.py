@@ -268,6 +268,7 @@ class CryptoLag:
                     log.warning("mm step failed %s: %s", tk, e)
                 continue
             self.lw.paper_stop(tk, fy, q["yes_bid"], q["yes_ask"], m["close"] - now)  # test only, no orders
+            self.lw.poll_pending(tk, fy, now)
             self.lw.protect(tk, fy, q["yes_bid"], q["yes_ask"], rate, now)
             if m["close"] - now <= exit_s:  # last minutes: get out of trades that are going wrong
                 self.lw.exit_late(tk, fy, q["yes_bid"], q["yes_ask"], rate, float(self.cfg.get("exit_below", 0.40)))

@@ -117,6 +117,10 @@ lag_watch:
   model_stop: true          # 5+ min left: sell if the model values the trade at half the entry or less (and bid pays 75%+ of that)
   stop_value_share: 0.5
   mm_keep_usd: 15          # lag trades always leave $15 for the market maker (it may use any free cash beyond that)
+  maker_entry: true         # crypto lag entries rest one tick under the ask (no fee) instead of buying the ask
+  maker_wait_s: 30          # cancel an unfilled maker entry after 30s (or once the gap closes)
+  stop_c: 0.10              # cut a lag trade once its model value is 10c under cost
+  late_cut_s: 300           # last 5 min: close a losing lag trade if the loss is <= 10c, instead of riding it to settlement
 
 
 # Crypto lag: Kalshi BTC/ETH 15-minute up/down and hourly above/below vs the live Coinbase price.

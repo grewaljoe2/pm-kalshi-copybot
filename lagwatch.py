@@ -472,6 +472,24 @@ class LagWatch:
         n = int(stake // ask) if stake > 0 else 0
         if n < 1:
             return
+        if bot.mode == "live" and p.get("close") and self.cfg.get("maker_entry", True):
+            # crypto windows: rest a limit order one tick under the ask (maker: no fee) instead of paying the ask
+            if any(q["key"] == key for q in self.stats.get("pending", [])):
+                return
+            px = round(ask - 0.01, 2)
+            try:
+                o = bot.kalshi.create_order(p["ticker"], p["side"], "buy", n, px, None, post_only=True,
+                                            expiration_ts=int(time.time() + float(self.cfg.get("maker_wait_s", 30)) + 5))
+            except Exception as e:
+                log.info("LAGTRADE maker order failed %s: %s", p["ticker"], str(e)[:120])
+                return
+            if o.get("order_id"):
+                bot._commit(n * px)
+                self.stats.setdefault("pending", []).append({"id": o["order_id"], "key": key, "p": p, "n": n, "px": px,
+                                                             "filled": 0, "t0": time.time(), "grp": grp, "pm_mid": pm_mid})
+                log.info("LAGTRADE [%s] MAKER BID %d %s %s @ %.2f (ask %.2f, model %.2f)", grp, n, p["ticker"],
+                         p["side"].upper(), px, ask, pm_mid)
+            return
         if bot.mode == "live":
             # take whatever is available at the gap price (thin books: all-or-nothing orders fail)
             try:
@@ -568,6 +586,49 @@ class LagWatch:
         if x["count"] <= 0 and x in self.stats["trades"]:
             self.stats["trades"].remove(x)
 
+    def poll_pending(self, ticker: str, fair_yes: float, now: float) -> None:
+        """Maker entries: book fills as they come; cancel after maker_wait_s or once the gap has closed."""
+        pend = self.stats.get("pending", [])
+        for q in [q for q in pend if q["p"]["ticker"] == ticker]:
+            if now - q.get("polled", 0) < 2 and now - q["t0"] < float(self.cfg.get("maker_wait_s", 30)):
+                continue
+            q["polled"] = now
+            fair = fair_yes if q["p"]["side"] == "yes" else 1 - fair_yes
+            done = now - q["t0"] >= float(self.cfg.get("maker_wait_s", 30)) or \
+                fair - q["px"] < float(self.cfg.get("min_gap", 0.03)) / 2 or q["p"]["close"] - now <= 180
+            if done:
+                try:
+                    self.bot.kalshi.cancel_order(q["id"], ticker)
+                except Exception as e:
+                    log.info("LAGTRADE maker cancel %s: %s", q["id"], str(e)[:100])
+            try:
+                r = self.bot.kalshi.get_order(q["id"])
+            except Exception:
+                continue
+            f = int(float(r.get("fill_count_fp") or r.get("fill_count") or 0))
+            new = f - q["filled"]
+            if new > 0:
+                q["filled"] = f
+                self._book_fill(q, new)
+            st = str(r.get("status") or "").lower()
+            if done or st in ("canceled", "cancelled", "executed", "expired") or f >= q["n"]:
+                pend.remove(q)
+
+    def _book_fill(self, q: dict, n: int) -> None:
+        p, grp, key = q["p"], q["grp"], q["key"]
+        self.bot.ledger_queue.append(("open", f"Lag trade · {grp}", p["ticker"], p["side"], n, q["px"], p["title"]))
+        with self.lock:
+            x = next((x for x in self.stats["trades"] if x["key"] == key), None)
+            if x:
+                x["entry"] = (x["entry"] * x["count"] + q["px"] * n) / (x["count"] + n)
+                x["count"] += n
+            else:
+                self.stats["trades"].append({"key": key, "ticker": p["ticker"], "side": p["side"], "count": n,
+                                             "entry": q["px"], "t0": time.time(), "pm_mid": q["pm_mid"],
+                                             "title": p["title"], "group": grp, "close": p.get("close"),
+                                             "cond": p.get("cond"), "maker": True})
+        log.info("LAGTRADE [%s] MAKER FILL %d %s %s @ %.2f", grp, n, p["ticker"], p["side"].upper(), q["px"])
+
     def protect(self, ticker: str, fair_yes: float, yes_bid: float, yes_ask: float, rate: float, now: float) -> None:
         """Every tick on crypto windows: track each trade's best bid and price path, and sell when the
         bid falls through its profit-ladder floor -- unless the model still values it well above the
@@ -585,6 +646,14 @@ class LagWatch:
                 if not path or now - path[-1][0] >= 5:
                     path.append((int(now), round(bid, 3), round(fair, 3)))
                     del path[:-200]
+                left = float(x["close"]) - now
+                cut = float(self.cfg.get("stop_c", 0.10))
+                if left >= 90 and fair <= x["entry"] - cut and bid >= 0.75 * fair:
+                    self._sell(x, bid, rate, f"(stop: worth {fair:.2f}, {100 * cut:.0f}c+ under cost {x['entry']:.2f})")
+                    continue
+                if left <= float(self.cfg.get("late_cut_s", 300)) and fair < x["entry"] and bid >= x["entry"] - cut:
+                    self._sell(x, bid, rate, f"(late cut: worth {fair:.2f} < cost {x['entry']:.2f}, small loss)")
+                    continue
                 floor = profit_floor(x["entry"], x["peak"], rate)
                 if floor is None or bid > floor:
                     continue
