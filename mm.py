@@ -428,6 +428,8 @@ class MarketMaker:
         max_loss = float(self.cfg.get("max_single_loss", 0.03))
         if left <= float(self.cfg.get("open_until_left_s", 300)):  # late: don't carry a single side into settlement
             max_loss = float(self.cfg.get("late_single_loss", 0.10))
+        elif now - t0 > float(self.cfg.get("single_patience_s", 90)):  # stuck a while: accept a bit more to get flat
+            max_loss = float(self.cfg.get("stuck_single_loss", 0.06))
         if now - t0 > float(self.cfg.get("max_single_s", 30)) and b is not None and b >= 0.02 and \
                 b >= avg - max_loss and time.time() >= st.get("sell_wait", 0):
             f, pr = self.bot._execute(Target(tk, held), "sell", k, b)
