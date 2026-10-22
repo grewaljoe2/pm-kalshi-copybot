@@ -82,6 +82,8 @@ class CoinStream:
                 if not os.path.isdir(os.path.dirname(self.SAVE)):
                     continue
                 ready = [p for p in self.products if self.vol(p)]
+                if not ready:
+                    continue  # still warming up: keep the last good save
                 d = {"var": {p: self.var[p] for p in ready},
                      "hist": {p: list(self.hist[p])[-900:] for p in ready}}
                 tmp = self.SAVE + ".tmp"

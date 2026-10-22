@@ -104,7 +104,7 @@ lag_watch:
   size_levels: [0.05, 0.065, 0.08]  # stake per gap: starts at 5%, +1 step after a profitable day (10+ trades), -1 after a losing day
   size_up_min_trades: 10
   max_open_trades: 3        # at most 3 stakes in lag trades at once
-  daily_stop_pct: 0.05      # lag trades pause for the day after losing 5% of the balance
+  daily_stop_pct: 0.15      # lag trades pause for the day after losing 15% of the balance
   reserve_pct: 0.10         # once trading, 10% of balance is kept for lag trades only (whales/parlays can't use it)
   min_profit: 0.01          # sports lag: sell once it nets 1c+ per contract after fees
   hold_to_settle: true      # crypto lag: hold to settlement; sell early only if the bid pays at least fair value
