@@ -155,6 +155,7 @@ crypto_lag:
     pair_take_min: 0.01     # completing at once must still make 1c+ per pair after the fee
     max_single_s: 30        # one side only for 30s and no profitable pair -> sell it (if loss <= 3c)
     max_single_loss: 0.03
+    late_single_loss: 0.10  # last 5 min: close a single side losing up to 10c rather than hold it to settlement
     stop_c: 0.10            # one-sided holding whose model value is 10c+ under cost: cut it
     pair_arb_max: 0.98      # YES + NO both buyable for <= $0.98 after fees -> buy both at once
     pull_c: 0.01            # pull a quote at once if the model value drops 1c under it

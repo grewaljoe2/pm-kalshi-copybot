@@ -425,8 +425,11 @@ class MarketMaker:
                 return True
         t0 = st.setdefault("single_t", now)
         b = bid[held]
+        max_loss = float(self.cfg.get("max_single_loss", 0.03))
+        if left <= float(self.cfg.get("open_until_left_s", 300)):  # late: don't carry a single side into settlement
+            max_loss = float(self.cfg.get("late_single_loss", 0.10))
         if now - t0 > float(self.cfg.get("max_single_s", 30)) and b is not None and b >= 0.02 and \
-                b >= avg - float(self.cfg.get("max_single_loss", 0.03)) and time.time() >= st.get("sell_wait", 0):
+                b >= avg - max_loss and time.time() >= st.get("sell_wait", 0):
             f, pr = self.bot._execute(Target(tk, held), "sell", k, b)
             if f:
                 px = pr / f
