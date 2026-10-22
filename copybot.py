@@ -1071,13 +1071,17 @@ class CopyBot:
     def equity(self) -> float:
         """Paper: starting bankroll + settled P&L. Live: Kalshi cash + money in open bets."""
         if self.mode == "live" and self.balance is not None:
-            return self.balance + self.open_cost()
+            # Kalshi's balance still includes money sitting in waiting orders: add only bets that filled
+            lots = sum(l["cost"] + l.get("fee", 0) for l in self.state.data["lots"])
+            return self.balance - getattr(self, "_unsynced", 0.0) + lots
         start = float(self.bank.get("start_usd", 100))
         return start + sum(c["pnl"] for c in self.state.data["closed"])
 
     def cash(self) -> float:
         if self.mode == "live" and self.balance is not None:
-            return self.balance - getattr(self, "_unsynced", 0.0)  # orders placed since the last balance read
+            waiting = sum(r["remaining"] * r["price"] for r in self.state.data.get("resting", []))
+            # minus fills since the last balance read, minus money promised to waiting orders
+            return self.balance - getattr(self, "_unsynced", 0.0) - waiting
         return self.equity() - self.open_cost()
 
     # ---- future-parlay pot (bets settling 3+ days out live only here) ---------- #
@@ -1554,7 +1558,6 @@ class CopyBot:
             oid = o.get("order_id")
         else:
             oid = f"paper-{uuid.uuid4()}"
-        self._commit(count * price)
         resting.append({"id": oid, "ticker": tgt.ticker, "side": tgt.side, "price": price, "count": count,
                         "remaining": count, "filled": 0, "fee_rate": rate, "whale": name,
                         "title": t.get("title") or "", "outcome": t.get("outcome"), "score": sc["score"],
@@ -1597,6 +1600,7 @@ class CopyBot:
             if new:
                 px = r["price"]
                 fee = kalshi_fee(new, px, r["fee_rate"])
+                self._commit(new * px + fee)
                 self.state.add_position(r["ticker"], r["side"], new)
                 self.state.add_spent(new * px + fee)
                 self.state.open_lot(r["whale"], r["ticker"], r["side"], new, px, fee, r["title"])
@@ -2367,7 +2371,6 @@ class CopyBot:
                 log.error("combo limit order failed: %s", e)
                 oid = None
         if oid:
-            self._commit(count * price)
             self.state.data.setdefault("resting", []).append(
                 {"id": oid, "ticker": combo_tk, "side": "yes", "price": price, "count": count,
                  "remaining": count, "filled": 0, "fee_rate": 0.0175, "whale": name, "title": title,
