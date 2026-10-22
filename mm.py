@@ -309,6 +309,11 @@ class MarketMaker:
             allow_y = False
         if net <= -cap:
             allow_n = False
+        if c.get("pairs_only", True):  # holding one side: only quote the side that completes the pair, never add more
+            if net > 0:
+                allow_y = False
+            if net < 0:
+                allow_n = False
         # completing an open pair at a profit is always allowed (and priced to stay profitable)
         if inv_y > inv_n:
             avg_y = st["inv"]["yes"][1] / inv_y
