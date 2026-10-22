@@ -197,9 +197,10 @@ class CryptoLag:
         self.markets = keep
         if self.ks:
             self.ks.watch(list(keep))
-            if hasattr(self.ks, "watch_books"):
-                self.ks.prune_books(keep)
-                self.ks.watch_books(list(keep))
+            if hasattr(self.ks, "watch_books"):  # live books only where speed matters (15-minute markets)
+                fast = [t for t, m in keep.items() if m["kind"] == "15m"]
+                self.ks.prune_books(fast)
+                self.ks.watch_books(fast)
         log.info("CRYPTO watching %d Kalshi crypto markets (%s)", len(keep),
                  ", ".join(f"{s}:{sum(1 for x in keep.values() if x['series'] == s)}" for s in SERIES))
 
