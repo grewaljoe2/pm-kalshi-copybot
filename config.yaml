@@ -208,13 +208,13 @@ combos:
 
 # Bankroll mode (sizing: score). Paper mode tracks a virtual bankroll starting here.
 bankroll:
-  start_usd: 158.49         # live: total deposited (98.49 + 60 on Oct 22; used for the Return %)
+  start_usd: 208.49         # live: total deposited (98.49 + 60 + 50 on Oct 22; used for the Return %)
   reserve_usd: 20           # extra deposit kept for strong whale trades + lag trades (shared, first come first served)
   reserve:
     min_score: 80           # strong trade = score 80+ ...
     min_whales: 3           #   ... or 3+ whales on the same side (Best-bets picks always count)
   future_pot_usd: 20        # separate pot: the ONLY money for bets settling 3+ days out (big NFL parlays etc.)
-  crypto_pot_usd: 0         # deposit just for lag trades + market maker (whales/combos never use it)
+  crypto_pot_usd: 50        # deposit just for lag trades + market maker (whales/combos never use it)
                             # wins refill it to this size, profit above goes to the main bankroll; losses shrink it
   horizon:
     far_days: 3             # settles 3+ days out -> future pot only
