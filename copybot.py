@@ -914,17 +914,33 @@ class CopyBot:
         log.warning("Bot %s from dashboard", "PAUSED" if value else "RESUMED")
 
     # ---- main loop ------------------------------------------------------- #
+    def _net_ledger(self, tk: str) -> None:
+        """Kalshi holds one net position per market: YES and NO lots in the same market cancel out and
+        $1 per pair comes back right away. Mirror that in the records."""
+        y, n = self.state.position(tk, "yes"), self.state.position(tk, "no")
+        pairs = int(min(y, n))
+        if pairs <= 0:
+            return
+        lots = self.state.data["lots"]
+        def avg(side):
+            ls = [l for l in lots if l["ticker"] == tk and l["side"] == side and l["count"] > 0]
+            c = sum(l["count"] for l in ls)
+            return (sum(l["cost"] for l in ls) / c) if c else 0.5
+        ay, an = avg("yes"), avg("no")
+        name = next((l["whale"] for l in lots if l["ticker"] == tk), "Pair")
+        self.state.add_position(tk, "yes", -pairs)
+        self.state.add_position(tk, "no", -pairs)
+        self.state.sell_lots(tk, "yes", pairs, 1 - an, 0.0)  # pair profit lands on the YES side
+        self.state.sell_lots(tk, "no", pairs, an, 0.0)
+        self._journal(name, {"title": f"pair x{pairs}", "outcome": "pair", "price": 1 - ay - an},
+                      Target(tk, "yes"), f"pair done ({100 * (1 - ay - an):+.0f}c each)", pairs, ay + an)
+        log.info("PAIR netted %s x%d: YES %.3f + NO %.3f -> %+.1fc each", tk, pairs, ay, an, 100 * (1 - ay - an))
+
     def _apply_ledger_queue(self) -> None:
         while self.ledger_queue:
             item = self.ledger_queue.pop(0)
-            if item[0] == "net":  # market maker: YES and NO in one market cancel out, $1 per pair back now
-                _, name, tk, n, ay, an = item
-                self.state.add_position(tk, "yes", -n)
-                self.state.add_position(tk, "no", -n)
-                self.state.sell_lots(tk, "yes", n, 1 - an, 0.0)  # pair profit lands on the YES side
-                self.state.sell_lots(tk, "no", n, an, 0.0)
-                self._journal(name, {"title": f"pair x{n}", "outcome": "pair", "price": 1 - ay - an},
-                              Target(tk, "yes"), f"pair done (+{100 * (1 - ay - an):.0f}c each)", n, ay + an)
+            if item[0] == "net":  # (older queue entries) netting now happens on every open
+                self._net_ledger(item[2])
                 continue
             op, name, tk, sd, n, px, title = item
             fee = 0.0 if str(name).startswith("MM ") else kalshi_fee(n, px, self.fee_rate)  # maker fills: no fee
@@ -934,6 +950,7 @@ class CopyBot:
                 self.state.add_spent(n * px + fee)
                 self.state.open_lot(name, tk, sd, n, px, fee, title)
                 self._journal(name, {"title": title, "outcome": sd, "price": px}, tgt, "buy", n, px)
+                self._net_ledger(tk)
             else:
                 self.state.add_position(tk, sd, -n)
                 self.state.sell_lots(tk, sd, n, px, fee)
@@ -2235,6 +2252,7 @@ class CopyBot:
                     self.state.add_position(tk, side, miss)
                     self.state.open_lot("Recovered", tk, side, miss, px, kalshi_fee(miss, px, self.fee_rate), tk)
                     log.info("RECOVER %d %s %s @ %.3f from Kalshi into the records", miss, tk, side.upper(), px)
+                    self._net_ledger(tk)
                 continue
             held = raw
             if held <= 0:

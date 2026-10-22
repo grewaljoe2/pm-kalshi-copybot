@@ -159,6 +159,7 @@ class MarketMaker:
             st["last_poll"] = now
             self._poll_fills(tk, st)
         c = self.cfg
+        self._take_profit(tk, st, fair, q, m["close"] - now)
         hs, size = float(c.get("half_spread", 0.03)), int(c.get("size", 5))
         inv_y, inv_n = st["inv"]["yes"][0], st["inv"]["no"][0]
         net = inv_y - inv_n
@@ -214,6 +215,42 @@ class MarketMaker:
                 self.__dict__.setdefault("_last_gate", {})[st["coin"]] = f"no cash (${free:.2f} free)"
                 continue
             self._place(tk, st, side, n, px, m)
+
+    def _take_profit(self, tk, st, fair, q, left) -> None:
+        """One-sided holdings that are up: sell instead of riding them to settlement.
+        Sell when the bid is up take_profit_pct on cost, or pays more than the model's value, or (last
+        4 minutes) anything in profit after the fee. Selling needs no cash."""
+        from copybot import Target
+        rate = getattr(self.bot, "fee_rate", 0.07)
+        for side, other in (("yes", "no"), ("no", "yes")):
+            n = st["inv"][side][0] - st["inv"][other][0]
+            if n <= 0:
+                continue
+            avg = st["inv"][side][1] / st["inv"][side][0]
+            bid = q["yes_bid"] if side == "yes" else 1 - q["yes_ask"]
+            value = fair if side == "yes" else 1 - fair
+            if bid is None or bid <= 0.01:
+                continue
+            net = bid - avg - rate * bid * (1 - bid)
+            tp = float(self.cfg.get("take_profit_pct", 0.5))
+            why = ("up %.0f%%" % (100 * (bid / avg - 1)) if net >= max(0.02, tp * avg) else
+                   "bid above value" if (bid >= value + 0.01 and net > 0) else
+                   "locking profit near close" if (left <= float(self.cfg.get("lock_last_s", 240)) and net >= 0.01) else "")
+            if not why:
+                continue
+            filled, proceeds = self.bot._execute(Target(tk, side), "sell", n, bid)
+            if not filled:
+                continue
+            px = proceeds / filled
+            name = f'MM · {st["coin"]} 15m'
+            self.bot.ledger_queue.append(("close", name, tk, side, filled, px, f'{st["coin"]} 15m market making'))
+            inv = st["inv"][side]
+            inv[1] -= filled * avg
+            inv[0] -= filled
+            if st["orders"].get(other):  # the pair-completing quote isn't needed any more
+                self._cancel(tk, st, other, "profit taken")
+            log.info("MM take profit %s %s x%d @ %.2f (cost %.2f, %+.1fc each) %s", tk, side.upper(), filled, px, avg,
+                     100 * net, why)
 
     # ---- orders ----------------------------------------------------------------------------- #
     def _place(self, tk, st, side, n, px, m) -> None:
@@ -275,9 +312,8 @@ class MarketMaker:
         inv[1] += n * px
         y, no = st["inv"]["yes"], st["inv"]["no"]
         pairs = min(y[0], no[0])
-        if pairs > 0:  # Kalshi nets YES against NO: $1 per pair comes back now
+        if pairs > 0:  # Kalshi nets YES against NO: $1 per pair comes back now (the ledger nets it too)
             ay, an = y[1] / y[0], no[1] / no[0]
-            self.bot.ledger_queue.append(("net", name, tk, pairs, ay, an))
             y[0] -= pairs
             y[1] -= pairs * ay
             no[0] -= pairs
