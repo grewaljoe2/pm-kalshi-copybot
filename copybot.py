@@ -1026,6 +1026,19 @@ class CopyBot:
             return self.balance
         return self.equity() - self.open_cost()
 
+    def lag_reserve(self) -> float:
+        """Cash kept free for live lag trades (only once lag trading is switched on)."""
+        lw = self.state.data.get("lagwatch") or {}
+        lc = self.cfg.get("lag_watch", {}) or {}
+        if lw.get("mode") != "trade" or not lc.get("enabled", True):
+            return 0.0
+        in_use = sum(x["count"] * x["entry"] for x in lw.get("trades", []))
+        return max(0.0, self.equity() * float(lc.get("reserve_pct", 0.10)) - in_use)
+
+    def spendable_cash(self) -> float:
+        """Free cash for whale copies, board picks and parlays (the lag reserve is set aside)."""
+        return self.cash() - self.lag_reserve()
+
     def current_stage(self) -> dict:
         """Growth plan: bet heavier while the account is small, taper as it grows.
         Drawdown brake: 30% below peak -> safest stage until it recovers."""
@@ -1381,7 +1394,7 @@ class CopyBot:
         budget = eq * pct
         budget = min(budget, eq * self.current_stage().get("max_game_pct", b.get("max_game_pct", 0.08)) - held_usd)
         budget = min(budget, eq * self.current_stage().get("max_open_pct", b.get("max_open_pct", 0.7)) - self.open_cost())
-        budget = min(budget, self.cash())
+        budget = min(budget, self.spendable_cash())
         if budget < b.get("min_stake_usd", 2.0):
             return 0.0, "bankroll limits leave no room"
         return budget, None
@@ -1938,8 +1951,8 @@ class CopyBot:
         left = eq * float(cc.get("daily_budget_pct", 0.45)) - self._combo_spent_today()
         if getattr(self, "_borrow_ok", False):  # whale share idle (bad prices): use it, keep a reserve
             reserve = eq * float((cc.get("borrow", {}) or {}).get("keep_free_pct", 0.15))
-            left = max(left, self.cash() - reserve)
-        stake = min(stake, left, max(0.0, self.cash() - 0.5))
+            left = max(left, self.spendable_cash() - reserve)
+        stake = min(stake, left, max(0.0, self.spendable_cash() - 0.5))
         return round(stake, 2) if stake >= float(cc.get("min_stake_usd", 1.0)) else 0.0
 
     def _run_slate(self, lg: str, plan: list[list[dict]], cc: dict) -> list[dict]:
@@ -2066,6 +2079,7 @@ class CopyBot:
             "scoreboard": self.state.scoreboard(),
             "equity": round(self.equity(), 2),
             "cash": round(self.cash(), 2),
+            "lag_reserve": round(self.lag_reserve(), 2),
             "start_usd": float(self.bank.get("start_usd", 100)),
             "stage": self.current_stage().get("name"),
             "lagwatch": self.state.data.get("lagwatch") or {},

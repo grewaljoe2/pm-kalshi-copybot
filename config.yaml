@@ -86,6 +86,7 @@ lag_watch:
   max_pairs: 12
   stake_pct: 0.03           # trade mode: 3% of balance per gap
   max_open_pct: 0.10        # at most 10% of balance in lag trades at once
+  reserve_pct: 0.10         # once trading, 10% of balance is kept for lag trades only (whales/parlays can't use it)
   min_profit: 0.01          # sell once it nets 1c+ per contract after fees, else hold to settlement
 
 # When buying at Kalshi's ask isn't worth it, rest a post-only limit order at a fair price
