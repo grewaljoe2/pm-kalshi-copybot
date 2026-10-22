@@ -290,6 +290,7 @@ class MarketMaker:
             st["last_poll"] = now
             self._poll_fills(tk, st)
         c = self.cfg
+        self._markouts(st, fair, now)
         self._sync_inv(tk, st)
         self._take_profit(tk, st, fair, q, m["close"] - now)
         hs, size = float(c.get("half_spread", 0.03)), int(c.get("size", 5))
@@ -350,6 +351,25 @@ class MarketMaker:
                 self.__dict__.setdefault("_last_gate", {})[st["coin"]] = f"no cash (${free:.2f} free)"
                 continue
             self._place(tk, st, side, n, px, m)
+
+    def _markouts(self, st, fair, now) -> None:
+        """Fill quality: value of what we bought 10s and 60s after the fill minus what we paid.
+        Consistently negative = our quotes are getting picked off."""
+        agg = self.__dict__.setdefault("_mo", {"10": [0.0, 0], "60": [0.0, 0]})
+        for mk in list(st.get("marks", [])):
+            v = fair if mk["side"] == "yes" else 1 - fair
+            for k, secs in (("10", 10), ("60", 60)):
+                if k not in mk and now - mk["t"] >= secs:
+                    mk[k] = v - mk["px"]
+                    agg[k][0] += mk[k] * mk["n"]
+                    agg[k][1] += mk["n"]
+            if "60" in mk:
+                st["marks"].remove(mk)
+        if agg["60"][1] and now - getattr(self, "_mo_log", 0) > 600:
+            self._mo_log = now
+            log.info("MM_MARKOUT avg per contract: after 10s %+.1fc (%d), after 60s %+.1fc (%d)",
+                     100 * agg["10"][0] / max(1, agg["10"][1]), agg["10"][1],
+                     100 * agg["60"][0] / max(1, agg["60"][1]), agg["60"][1])
 
     def _sync_inv(self, tk, st) -> None:
         """Holdings always match the records (which match Kalshi after reconcile + netting),
@@ -417,11 +437,46 @@ class MarketMaker:
                      100 * net, why)
 
     # ---- orders ----------------------------------------------------------------------------- #
+    def _group(self, tk, st) -> str | None:
+        """Kalshi order group per window: if more than breaker_contracts fill within 15s, Kalshi itself
+        cancels all our quotes in that market (circuit breaker against getting run over)."""
+        lim = int(self.cfg.get("breaker_contracts", 0) or 0)
+        if lim <= 0 or getattr(self, "_no_groups", False):
+            return None
+        if st.get("group"):
+            return st["group"]
+        if time.time() < st.get("group_wait", 0):
+            return "WAIT"
+        try:
+            j = self.bot.kalshi._req("POST", "/portfolio/order_groups/create",
+                                     json={"contracts_limit": lim, "exchange_index": self.bot.kalshi.market_shard(tk)})
+            st["group"] = j.get("order_group_id")
+            if not st["group"]:
+                raise RuntimeError(f"no order_group_id in {str(j)[:120]}")
+            log.info("MM circuit breaker set for %s: Kalshi cancels all quotes if %d+ fill in 15s", tk, lim)
+            return st["group"]
+        except Exception as e:
+            log.warning("MM order group create failed (quoting without it): %s", str(e)[:160])
+            self._no_groups = True
+            return None
+
     def _place(self, tk, st, side, n, px, m) -> None:
+        grp = self._group(tk, st)
+        if grp == "WAIT":
+            return  # breaker tripped recently: sit out a little
         try:
             exp = int(m["close"] - float(self.cfg.get("expire_before_close_s", 150)))
-            o = self.bot.kalshi.create_order(tk, side, "buy", n, px, None, post_only=True, expiration_ts=exp)
+            o = self.bot.kalshi.create_order(tk, side, "buy", n, px, None, post_only=True, expiration_ts=exp,
+                                             order_group_id=grp)
         except Exception as e:
+            msg = str(e).lower()
+            if grp and "group" in msg:  # breaker tripped (or group refused): new group after a 2-min pause
+                log.warning("MM CIRCUIT BREAKER on %s: Kalshi pulled our quotes (%s); pausing 2 min", tk, str(e)[:100])
+                st["group"], st["group_wait"] = None, time.time() + 120
+                for sd in list(st["orders"]):
+                    self._poll_one(tk, st, sd)
+                    st["orders"].pop(sd, None)
+                return
             log.info("MM quote rejected %s %s @ %.2f: %s", tk, side.upper(), px, str(e)[:120])
             return
         oid = o.get("order_id")
@@ -470,6 +525,7 @@ class MarketMaker:
             st["orders"].pop(side, None)
 
     def _on_fill(self, tk, st, side, n, px) -> None:
+        st.setdefault("marks", []).append({"t": time.time(), "side": side, "px": px, "n": n})
         name = f'MM · {st["coin"]} 15m'
         self.bot._commit(n * px)
         self.bot.ledger_queue.append(("open", name, tk, side, n, px, f'{st["coin"]} 15m market making'))

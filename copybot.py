@@ -500,7 +500,7 @@ class Kalshi:
 
     def create_order(self, ticker: str, side: str, action: str, count: int,
                      price: float, tif: str | None, post_only: bool = False,
-                     expiration_ts: int | None = None) -> dict:
+                     expiration_ts: int | None = None, order_group_id: str | None = None) -> dict:
         """Kalshi Create Order V2 (POST /portfolio/events/orders).
 
         V2 orders are always on the YES leg: 'bid' buys YES, 'ask' sells YES. So buying NO at q
@@ -524,6 +524,8 @@ class Kalshi:
             body["reduce_only"] = True  # V2 allows reduce_only only with IOC
         if post_only:
             body["post_only"] = True
+        if order_group_id:
+            body["order_group_id"] = order_group_id
         if expiration_ts and body["time_in_force"] == "good_till_canceled":
             body["expiration_time"] = int(expiration_ts)
         need = 0.0
