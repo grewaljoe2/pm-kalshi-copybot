@@ -256,7 +256,7 @@ class MarketMaker:
             from lagwatch import profit_floor
             floor = profit_floor(avg, pk[side], 0.0)  # maker buys pay no fee; selling pays rate on the bid
             floor = floor and floor + rate * bid * (1 - bid)
-            if floor and bid <= floor and value <= floor + 0.08:
+            if self.cfg.get("profit_ladder", False) and floor and bid <= floor and value <= floor + 0.08:
                 why_l = f"profit ladder: peak {pk[side]:.2f}, floor {floor:.2f}"
             else:
                 why_l = ""
