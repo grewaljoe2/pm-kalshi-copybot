@@ -112,6 +112,8 @@ lag_watch:
   crypto_min_price: 0.10    # crypto: real order-book price must be 10c-90c
   borrow_pot: true          # lag trades may use the future pot's idle cash (back within 15 min)
   exit_min_bid_share: 0.75  # late exit only if someone pays 75%+ of model value
+  profit_ladder: true       # up 10%+ -> never below break-even; 30%+ keeps 40% of gain, 60%+ 60%, 100%+ 70%
+  ladder_model_margin: 0.08 # skip the stop if the model still values it 8c+ above the floor (a book dip)
 
 
 # Crypto lag: Kalshi BTC/ETH 15-minute up/down and hourly above/below vs the live Coinbase price.
