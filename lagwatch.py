@@ -433,6 +433,14 @@ class LagWatch:
         key = f'{p["ticker"]}|{p["side"]}'
         if any(x["key"] == key for x in self.stats["trades"]):
             return
+        if p.get("close"):  # crypto windows
+            if p["close"] - time.time() <= float(self.cfg.get("no_entry_last_s", 150)):
+                return  # inside the late-exit zone: a buy here would just be sold again at a loss
+            lo = float(self.cfg.get("crypto_min_price", 0.10))
+            if not (lo <= ask <= 1 - lo):
+                return  # the real order-book price is a longshot even if the quote wasn't
+            if any(x["ticker"] == p["ticker"] and x["side"] != p["side"] for x in self.stats["trades"]):
+                return  # already holding the other side of this window: don't bet both ways
         bot = self.bot
         eq = bot.equity()
         pct, max_open, why = self.sizing(eq)

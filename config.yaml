@@ -108,6 +108,9 @@ lag_watch:
   reserve_pct: 0.10         # once trading, 10% of balance is kept for lag trades only (whales/parlays can't use it)
   min_profit: 0.01          # sports lag: sell once it nets 1c+ per contract after fees
   hold_to_settle: true      # crypto lag: hold to settlement; sell early only if the bid pays at least fair value
+  no_entry_last_s: 150      # crypto: no new buys in the last 2.5 minutes of a window
+  crypto_min_price: 0.10    # crypto: real order-book price must be 10c-90c
+
 
 # Crypto lag: Kalshi BTC/ETH 15-minute up/down and hourly above/below vs the live Coinbase price.
 # Same evidence rules and auto-switch as sports (groups "BTC 15m", "BTC hourly", "ETH 15m", ...).
