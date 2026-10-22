@@ -1265,6 +1265,37 @@ class CopyBot:
                                else round(min(self.lag_reserve(), max(0.0, self.cash())), 2))
         return out
 
+    def kalshi_truth(self, coins: tuple[str, ...]) -> float | None:
+        """Kalshi's own realized P&L today after fees on 15m crypto markets for these coins (cached 5 min).
+        The off switches use this, not our records."""
+        c = self.__dict__.setdefault("_truth", {})
+        now = time.time()
+        if c.get("t", 0) > now - 300 and "rows" in c:
+            rows = c["rows"]
+        else:
+            try:
+                rows, cur = [], None
+                for _ in range(10):
+                    p = {"limit": 200, "settlement_status": "all"}
+                    if cur:
+                        p["cursor"] = cur
+                    j = self.kalshi._req("GET", "/portfolio/positions", params=p)
+                    rows += j.get("market_positions") or []
+                    cur = j.get("cursor")
+                    if not cur:
+                        break
+                c.update(t=now, rows=rows)
+            except Exception as e:
+                log.warning("kalshi truth check failed: %s", e)
+                return None
+        day = time.strftime("%y%b%d", time.gmtime(now - 4 * 3600)).upper()
+        tot = 0.0
+        for r in rows:
+            tk = r.get("ticker") or ""
+            if "15M-" in tk and day in tk and tk[2:].split("15M")[0] in coins:
+                tot += float(r.get("realized_pnl_dollars") or 0) - float(r.get("fees_paid_dollars") or 0)
+        return tot
+
     def crypto_pot_usd(self) -> float:
         """Money deposited only for lag trades + the market maker: whales, combos and board picks never use it."""
         return max(0.0, float(self.bank.get("crypto_pot_usd", 0) or 0))

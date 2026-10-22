@@ -101,7 +101,7 @@ lag_watch:
   max_pre: 200              # upcoming markets polled every pre_poll_seconds
   pre_poll_seconds: 30
   discover_every_s: 600     # re-scan Polymarket's sports list every 10 min
-  size_levels: [0.05, 0.065, 0.08]  # stake per gap: starts at 5%, +1 step after a profitable day (10+ trades), -1 after a losing day
+  size_levels: [0.03, 0.04, 0.05]  # stake per gap: starts at 5%, +1 step after a profitable day (10+ trades), -1 after a losing day
   size_up_min_trades: 10
   max_open_trades: 3        # at most 3 stakes in lag trades at once
   daily_stop_pct: 0.15      # lag trades pause for the day after losing 15% of the balance
@@ -124,7 +124,7 @@ lag_watch:
 crypto_lag:
   enabled: true
   poll_seconds: 0.25        # check every quarter second (gaps often last only 1-2 seconds)
-  min_gap: 0.04             # fair value at least 4c above Kalshi's ask after the fee
+  min_gap: 0.06             # fair value at least 6c above Kalshi's ask after the fee
   basis: 0.0003             # allowance for Kalshi settling on the CF Benchmarks index, not Coinbase
   exit_seconds: 150         # last 2.5 min of a window: sell trades that are going wrong
   exit_below: 0.25          #   = our model gives them under 25% (or the bid pays more than they're worth)
@@ -132,9 +132,9 @@ crypto_lag:
   mm:                       # two-sided market making (resting YES + NO quotes around fair value)
     enabled: true
     coins: [SOL, XRP, DOGE] # 15-minute markets of these coins (no lag trades there)
-    size: 5                 # contracts per quote
-    half_spread: 0.03       # quote 3c either side of fair value
-    max_inventory: 10       # at most 10 contracts more on one side than the other
+    size: 3                 # contracts per quote
+    half_spread: 0.04       # quote 4c either side of fair value
+    max_inventory: 6        # at most 6 contracts more on one side than the other
     lean_per_contract: 0.002
     reprice_c: 0.02         # move a quote once fair value moved 2c+
     min_replace_s: 4        # ... and not more often than every 4s per side
@@ -146,7 +146,10 @@ crypto_lag:
     stop_before_close_s: 180
     expire_before_close_s: 150  # Kalshi cancels our quotes itself 2.5 min before close
     daily_stop_usd: 8       # stop quoting for the day after losing $8
-    paused: true            # no new quotes (hidden-fill bug being fixed); still sells/stops what it holds
+    paused: false           # true = no new quotes; still sells/stops what it holds
+    kill_usd: 5             # off for the day if Kalshi says market making is down $5 after fees
+    pull_c: 0.01            # pull a quote at once if the model value drops 1c under it
+    pair_min_c: 0.02        # completing a pair must make at least 2c
     take_profit_pct: 0.5    # one-sided holding up 50%+ on cost: sell it
     lock_last_s: 240        # last 4 minutes: sell any one-sided holding that's in profit after the fee
 

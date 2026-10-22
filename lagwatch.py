@@ -537,6 +537,12 @@ class LagWatch:
             st["size_day"] = today
         pct = levels[max(0, min(len(levels) - 1, int(st.get("size_level", 0))))]
         max_open = pct * float(self.cfg.get("max_open_trades", 3))
+        truth = self.bot.kalshi_truth(("BTC", "ETH")) if hasattr(self.bot, "kalshi_truth") else None
+        if truth is not None and truth < -float(self.cfg.get("kill_usd", 10)):
+            if st.get("truth_stopped_day") != today:
+                st["truth_stopped_day"] = today
+                log.warning("LAG OFF for today: Kalshi says BTC/ETH lag is %+.2f after fees", truth)
+            return pct, max_open, "daily stop (Kalshi)"
         pnl_today, _ = self.day_pnl(today)
         if pnl_today < -eq * float(self.cfg.get("daily_stop_pct", 0.05)):
             if st.get("stopped_day") != today:

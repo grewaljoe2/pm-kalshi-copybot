@@ -209,6 +209,22 @@ class MarketMaker:
         except Exception as e:
             log.warning("MM sweep failed: %s", str(e)[:120])
 
+    def truth_stop(self, now: float) -> bool:
+        """Off switch on Kalshi's real numbers: market maker down kill_usd today (after fees) -> no new quotes."""
+        if now - getattr(self, "_truth_t", 0) < 300:
+            return getattr(self, "_truth_off", False)
+        self._truth_t = now
+        v = self.bot.kalshi_truth(tuple(self.coins()))
+        if v is None:
+            return getattr(self, "_truth_off", False)
+        off = v < -float(self.cfg.get("kill_usd", 5))
+        if off and not getattr(self, "_truth_off", False):
+            log.warning("MM OFF for today: Kalshi says market making is %+.2f after fees (limit -$%.0f)", v,
+                        float(self.cfg.get("kill_usd", 5)))
+        self._truth_off = off
+        self._truth_v = v
+        return off
+
     def check_positions(self) -> None:
         """Every minute: Kalshi's position on each market-maker market vs our records. A difference seen
         twice in a row (not just a fill still on its way) is booked so the exits can manage it."""
@@ -250,8 +266,9 @@ class MarketMaker:
         quotes = {tk[-14:]: {sd: o["price"] for sd, o in st["orders"].items()} for tk, st in self.mk.items() if st["orders"]}
         inv = {tk[-14:]: (st["inv"]["yes"][0], st["inv"]["no"][0]) for tk, st in self.mk.items()
                if st["inv"]["yes"][0] or st["inv"]["no"][0]}
-        log.info("MM status: quotes %s | holding (YES, NO) %s | gate %s | today $%.2f", quotes, inv,
-                 getattr(self, "_last_gate", {}), self.daily_pnl())
+        log.info("MM status: quotes %s | holding (YES, NO) %s | gate %s | today $%.2f (Kalshi says %s)", quotes, inv,
+                 getattr(self, "_last_gate", {}), self.daily_pnl(),
+                 "?" if getattr(self, "_truth_v", None) is None else f"{self._truth_v:+.2f}")
 
     def step(self, tk: str, m: dict, fair: float, q: dict, now: float) -> None:
         if self.bot.mode != "live" or not self.bot.kalshi.pkey:
@@ -280,7 +297,7 @@ class MarketMaker:
         net = inv_y - inv_n
         allow_y, allow_n, why = self.gate(m, fair, now)
         self.__dict__.setdefault("_last_gate", {})[st["coin"]] = why or f"ok fair {fair:.2f}"
-        stopped = self.daily_pnl() < -float(c.get("daily_stop_usd", 8))
+        stopped = self.daily_pnl() < -float(c.get("daily_stop_usd", 8)) or self.truth_stop(now)
         if stopped:
             allow_y = allow_n = False
         # lean toward the side that completes a pair
@@ -295,11 +312,11 @@ class MarketMaker:
         # completing an open pair at a profit is always allowed (and priced to stay profitable)
         if inv_y > inv_n:
             avg_y = st["inv"]["yes"][1] / inv_y
-            want["no"] = min(want["no"], round(math.floor((1 - avg_y - 0.01) * 100) / 100, 2))
+            want["no"] = min(want["no"], round(math.floor((1 - avg_y - float(c.get("pair_min_c", 0.02))) * 100) / 100, 2))
             allow_n = True
         elif inv_n > inv_y:
             avg_n = st["inv"]["no"][1] / inv_n
-            want["yes"] = min(want["yes"], round(math.floor((1 - avg_n - 0.01) * 100) / 100, 2))
+            want["yes"] = min(want["yes"], round(math.floor((1 - avg_n - float(c.get("pair_min_c", 0.02))) * 100) / 100, 2))
             allow_y = True
         if m["close"] - now < float(c.get("stop_before_close_s", 180)):
             allow_y = allow_n = False
@@ -314,6 +331,9 @@ class MarketMaker:
                 if o:
                     self._cancel(tk, st, side, why or "off")
                 continue
+            if o and o["price"] > px + float(c.get("pull_c", 0.01)) + 1e-9:
+                self._cancel(tk, st, side, "moved against")  # value dropped under our quote: pull it now
+                continue  # re-quote on a later tick
             if o and (abs(o["price"] - px) < float(c.get("reprice_c", 0.02)) - 1e-9 or now - o["t"] < float(c.get("min_replace_s", 4))):
                 continue  # close enough / changed too recently
             if o:
