@@ -134,7 +134,8 @@ crypto_lag:
     reprice_c: 0.02         # move a quote once fair value moved 2c+
     min_replace_s: 4        # ... and not more often than every 4s per side
     poll_s: 2               # check our quotes for fills every 2s
-    fair_min: 0.20          # no new quotes when fair value is under 20% / over 80%
+    fair_min: 0.30          # no new quotes when fair value is under 30% / over 70% (no longshots)
+    keep_free_for_closing: 5  # new pairs only while $5 stays free to complete them (Kalshi wants cash for every resting order)
     trend_z: 2.0            # 2-minute move over 2 std devs (this coin or BTC) = trend
     vol_spike: 2.0          # last-5-min volatility over 2x normal = pull quotes
     stop_before_close_s: 180

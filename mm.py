@@ -209,7 +209,8 @@ class MarketMaker:
             if closing:
                 n = max(1, min(size, abs(net)))  # just enough to complete the pair
             free = self.bot.cash() - 0.5  # may use the future pot's idle cash: it comes back within 15 min
-            if not closing and free - n * px < 0.5:  # completing a pair needs no cash (Kalshi nets it)
+            keep = float(self.cfg.get("keep_free_for_closing", 5.0))  # cash kept free to complete open pairs
+            if (not closing and free - n * px < keep) or (closing and free - n * px < 0.1):
                 self.__dict__.setdefault("_last_gate", {})[st["coin"]] = f"no cash (${free:.2f} free)"
                 continue
             self._place(tk, st, side, n, px, m)
