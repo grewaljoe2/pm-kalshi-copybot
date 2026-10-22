@@ -45,6 +45,7 @@ class CoinStream:
         self.var: dict[str, float] = {}        # EWMA of squared 1s log returns
         self.sec: dict[str, tuple] = {}        # last (second, price)
         self.hist: dict[str, deque] = {p: deque(maxlen=7200) for p in self.products}  # (sec, price)
+        self.since: dict[str, float] = {}      # when we started receiving prices
 
     def start(self) -> "CoinStream":
         threading.Thread(target=self._run, name="coinbase-ws", daemon=True).start()
@@ -59,14 +60,21 @@ class CoinStream:
                 break
         return best
 
+    WARMUP_S = 600
+    MIN_ANNUAL_VOL = 0.30  # never assume calmer than 30%/yr (BTC/ETH rarely trade below that)
+
     def vol(self, product: str) -> float | None:
-        """Per-second volatility (std of 1s log returns)."""
+        """Per-second volatility (std of 1s log returns). None until 10 min of data (too noisy before)."""
         v = self.var.get(product)
-        return math.sqrt(v) if v else None
+        if not v or time.time() - self.since.get(product, time.time()) < self.WARMUP_S:
+            return None
+        floor = self.MIN_ANNUAL_VOL / math.sqrt(365 * 24 * 3600)
+        return max(math.sqrt(v), floor)
 
     def _tick(self, product: str, px: float) -> None:
         now = time.time()
         self.price[product], self.ts[product] = px, now
+        self.since.setdefault(product, now)
         s = int(now)
         last = self.sec.get(product)
         if last is None or s > last[0]:

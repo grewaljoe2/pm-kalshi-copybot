@@ -451,8 +451,11 @@ class LagWatch:
         if g.get("mode") != "watch" or not c.get("auto_switch", True):
             return
         n, conv, games = g["gaps"], g["converged"], len(g.get("games", []))
-        if (n >= int(c.get("min_gaps", 8)) and conv / max(1, n) >= float(c.get("min_converge_rate", 0.6))
-                and games >= int(c.get("min_games", 3))):
+        crypto = name.split(" ")[0] in ("BTC", "ETH")  # model-priced: needs far more evidence
+        need_gaps = int(c.get("crypto_min_gaps", 30) if crypto else c.get("min_gaps", 8))
+        need_games = int(c.get("crypto_min_games", 8) if crypto else c.get("min_games", 3))
+        if (n >= need_gaps and conv / max(1, n) >= float(c.get("min_converge_rate", 0.6))
+                and games >= need_games):
             g["mode"] = "trade"
             g["switched_at"] = int(time.time())
             self.stats["mode"] = "trade"  # at least one group trading (dashboard + reserve)

@@ -81,6 +81,8 @@ lag_watch:
   min_gaps: 8               # evidence needed: at least 8 gaps
   min_games: 2              #   across at least 2 different games
   min_converge_rate: 0.6    #   and 60%+ could have been sold for 1c+ profit after both fees
+  crypto_min_gaps: 30       # crypto is priced by our model, so it needs more proof: 30 gaps
+  crypto_min_games: 8       #   across 8 different 15-min/hourly windows
   poll_seconds: 5
   min_gap: 0.03             # Kalshi at least 3c cheaper than Polymarket after the fee
   max_live: 60              # live markets polled every poll_seconds
