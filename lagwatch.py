@@ -633,7 +633,7 @@ class LagWatch:
             rec = {"held": bool(s.get("held")), "ticker": s["ticker"], "side": s["side"], "group": s.get("group"), "n": n, "entry": e,
                    "sold": s["sold"], "result": res, "flip": round(flip, 2), "hold": round(hold, 2),
                    "lock_2min": round(lock, 2), "best_possible": round(best, 2), "stop_loss": round(stop, 2),
-                   "stop_hit": s.get("stop_px") is not None, "day": time.strftime("%Y-%m-%d")}
+                   "stop_hit": s.get("stop_px") is not None, "day": __import__("copybot")._today()}
             done.append(rec)
             log.info("LAG_SHADOW %s", json.dumps(rec))
         del done[:-1000]
