@@ -248,10 +248,20 @@ class MarketMaker:
             if bid is None or bid <= 0.01:
                 continue
             net = bid - avg - rate * bid * (1 - bid)
+            pk = st.setdefault("peak", {})
+            pk[side] = max(pk.get(side, 0.0), bid)
+            from lagwatch import profit_floor
+            floor = profit_floor(avg, pk[side], 0.0)  # maker buys pay no fee; selling pays rate on the bid
+            floor = floor and floor + rate * bid * (1 - bid)
+            if floor and bid <= floor and value <= floor + 0.08:
+                why_l = f"profit ladder: peak {pk[side]:.2f}, floor {floor:.2f}"
+            else:
+                why_l = ""
             tp = float(self.cfg.get("take_profit_pct", 0.5))
             why = ("up %.0f%%" % (100 * (bid / avg - 1)) if net >= max(0.02, tp * avg) else
                    "bid above value" if (bid >= value + 0.01 and net > 0) else
-                   "locking profit near close" if (left <= float(self.cfg.get("lock_last_s", 240)) and net >= 0.01) else "")
+                   "locking profit near close" if (left <= float(self.cfg.get("lock_last_s", 240)) and net >= 0.01) else
+                   why_l)
             if not why:
                 continue
             filled, proceeds = self.bot._execute(Target(tk, side), "sell", n, bid)
@@ -263,6 +273,8 @@ class MarketMaker:
             inv = st["inv"][side]
             inv[1] -= filled * avg
             inv[0] -= filled
+            if inv[0] <= 0:
+                st.get("peak", {}).pop(side, None)
             if st["orders"].get(other):  # the pair-completing quote isn't needed any more
                 self._cancel(tk, st, other, "profit taken")
             log.info("MM take profit %s %s x%d @ %.2f (cost %.2f, %+.1fc each) %s", tk, side.upper(), filled, px, avg,

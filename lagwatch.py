@@ -52,6 +52,24 @@ def _jl(v):
     return json.loads(v) if isinstance(v, str) else (v or [])
 
 
+LADDER = ((1.00, 0.70), (0.60, 0.60), (0.30, 0.40), (0.10, 0.0))  # peak gain on cost -> share of it kept
+
+
+def profit_floor(entry: float, peak: float, rate: float, ladder=LADDER) -> float | None:
+    """Profit ladder: once a holding has been up 10%+, never let it go back below break-even; the
+    further it ran, the more of the gain is locked (30%+ keeps 40%, 60%+ keeps 60%, 100%+ keeps 70%).
+    Returns the lowest bid we accept before selling, or None while not armed yet."""
+    if entry <= 0 or peak <= entry:
+        return None
+    up = peak / entry - 1
+    fee = lambda b: rate * b * (1 - b)
+    be = entry + 2 * fee(entry) + 0.01  # selling here is roughly flat after both fees
+    for lvl, keep in ladder:
+        if up >= lvl:
+            return round(max(be, entry + keep * (peak - entry)), 4)
+    return None
+
+
 class LagWatch:
     def __init__(self, bot, cfg: dict):
         self.bot = bot
@@ -538,8 +556,34 @@ class LagWatch:
                      x["side"].upper(), px, x["entry"], 100 * self._net(x["entry"], px, rate), why)
             self._add_shadow(x, px, filled)
             x["count"] -= filled
+        if x["count"] <= 0:
+            self._log_path(x, "sold")
         if x["count"] <= 0 and x in self.stats["trades"]:
             self.stats["trades"].remove(x)
+
+    def protect(self, ticker: str, fair_yes: float, yes_bid: float, yes_ask: float, rate: float, now: float) -> None:
+        """Every tick on crypto windows: track each trade's best bid and price path, and sell when the
+        bid falls through its profit-ladder floor -- unless the model still values it well above the
+        floor (a dip in the book, not a reversal)."""
+        if not self.cfg.get("profit_ladder", True):
+            return
+        with self.lock:
+            for x in [x for x in self.stats["trades"] if x["ticker"] == ticker and x.get("close")]:
+                fair = fair_yes if x["side"] == "yes" else 1 - fair_yes
+                bid = yes_bid if x["side"] == "yes" else 1 - yes_ask
+                if bid is None or bid < 0.02:
+                    continue
+                x["peak"] = max(x.get("peak", 0.0), bid)
+                path = x.setdefault("path", [])
+                if not path or now - path[-1][0] >= 5:
+                    path.append((int(now), round(bid, 3), round(fair, 3)))
+                    del path[:-200]
+                floor = profit_floor(x["entry"], x["peak"], rate)
+                if floor is None or bid > floor:
+                    continue
+                if fair > floor + float(self.cfg.get("ladder_model_margin", 0.08)):
+                    continue  # model still says it's worth clearly more: don't get shaken out
+                self._sell(x, bid, rate, f"(profit ladder: peak {x['peak']:.2f}, floor {floor:.2f}, worth {fair:.2f})")
 
     def exit_late(self, ticker: str, fair_yes: float, yes_bid: float, yes_ask: float, rate: float,
                   exit_below: float) -> None:
@@ -649,12 +693,18 @@ class LagWatch:
             return now - x["t0"] > (75 * 60 if crypto else 18 * 3600)
         with self.lock:
             for x in [x for x in self.stats["trades"] if done(x) and x.get("close")]:
+                self._log_path(x, "held")
                 sh = self.stats.setdefault("shadow", [])  # held to the end: compare with a quick flip
                 sh.append({"key": x["key"], "ticker": x["ticker"], "side": x["side"], "group": x.get("group"),
                            "entry": x["entry"], "sold": x.get("flip_px") or x["entry"], "count": x["count"],
                            "close": x["close"], "t_sell": None, "max_bid": x.get("flip_px") or x["entry"],
                            "bid_late": None, "held": True, "stop_px": x.get("stop_px")})
             self.stats["trades"] = [x for x in self.stats["trades"] if not done(x)]
+
+    def _log_path(self, x: dict, how: str) -> None:
+        if x.get("path"):
+            log.info("LAG_PATH %s", json.dumps({"ticker": x["ticker"], "side": x["side"], "n": x["count"],
+                                                 "entry": x["entry"], "how": how, "path": x["path"]}))
 
     def _record(self, g: dict) -> None:
         st, grp = self.stats, self._g(g["group"])
