@@ -67,6 +67,31 @@ def start_background() -> None:
 
 
 
+def _lots_audit():
+    """One snapshot of open bets after start (ticker, cost, settle time, current price) for review."""
+    import json
+    time.sleep(90)
+    try:
+        lots = list(BOT.state.data.get("lots", [])) if BOT is not None else []
+        for l in lots:
+            row = {k: l.get(k) for k in ("whale", "ticker", "side", "count", "cost", "score", "title", "opened")}
+            try:
+                m = BOT.kdata.market(l["ticker"])
+                row["closes"] = m.get("expected_expiration_time") or m.get("close_time")
+                bid = m.get(f'{l["side"]}_bid_dollars') or m.get(f'{l["side"]}_bid')
+                row["bid_now"] = bid
+            except Exception as e:
+                row["err"] = str(e)[:80]
+            row["title"] = (row.get("title") or "")[:140]
+            log.info("LOTS_AUDIT %s", json.dumps(row))
+        log.info("LOTS_AUDIT done: %d lots, cash %.2f", len(lots), BOT.cash() if BOT else 0)
+    except Exception as e:
+        log.warning("lots audit failed: %s", e)
+
+
+_register("lots-audit", _lots_audit)
+
+
 # ---- player props (rated from ESPN game logs, refreshed every 30 min) ------- #
 PROPS: dict = {"picks": [], "updated": None, "error": None}
 
