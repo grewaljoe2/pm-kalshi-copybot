@@ -106,7 +106,8 @@ lag_watch:
   max_open_trades: 3        # at most 3 stakes in lag trades at once
   daily_stop_pct: 0.05      # lag trades pause for the day after losing 5% of the balance
   reserve_pct: 0.10         # once trading, 10% of balance is kept for lag trades only (whales/parlays can't use it)
-  min_profit: 0.01          # sell once it nets 1c+ per contract after fees, else hold to settlement
+  min_profit: 0.01          # sports lag: sell once it nets 1c+ per contract after fees
+  hold_to_settle: true      # crypto lag: hold to settlement; sell early only if the bid pays at least fair value
 
 # Crypto lag: Kalshi BTC/ETH 15-minute up/down and hourly above/below vs the live Coinbase price.
 # Same evidence rules and auto-switch as sports (groups "BTC 15m", "BTC hourly", "ETH 15m", ...).
@@ -116,7 +117,7 @@ crypto_lag:
   min_gap: 0.04             # fair value at least 4c above Kalshi's ask after the fee
   basis: 0.0003             # allowance for Kalshi settling on the CF Benchmarks index, not Coinbase
   exit_seconds: 150         # last 2.5 min of a window: sell trades that are going wrong
-  exit_below: 0.40          #   = our model gives them under 40% (or the bid pays more than they're worth)
+  exit_below: 0.25          #   = our model gives them under 25% (or the bid pays more than they're worth)
   min_price: 0.10           # skip contracts under 10c / over 90c (model least reliable there)
 
 # When buying at Kalshi's ask isn't worth it, rest a post-only limit order at a fair price

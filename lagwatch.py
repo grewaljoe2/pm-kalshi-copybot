@@ -390,7 +390,7 @@ class LagWatch:
                     self._record(f)
                     self.follow.remove(f)
             if k_bid:
-                self._maybe_sell(key, k_bid, rate)
+                self._maybe_sell(key, k_bid, rate, fair)
                 self.shadow_bid(key, k_bid, now)
 
     @staticmethod
@@ -518,10 +518,14 @@ class LagWatch:
                 if fair < exit_below or bid >= fair:
                     self._sell(x, bid, rate, f"(late exit: worth {fair:.2f}, bid {bid:.2f})")
 
-    def _maybe_sell(self, key: str, bid: float, rate: float) -> None:
+    def _maybe_sell(self, key: str, bid: float, rate: float, fair: float | None = None) -> None:
         from copybot import Target
         for x in [x for x in self.stats["trades"] if x["key"] == key]:
             if self._net(x["entry"], bid, rate) < float(self.cfg.get("min_profit", 0.01)):
+                continue
+            # crypto windows: hold to settlement (the full gap, one fee) unless the market already pays
+            # at least what the trade is worth
+            if x.get("close") and self.cfg.get("hold_to_settle", True) and fair is not None and bid < fair:
                 continue
             filled, proceeds = self.bot._execute(Target(x["ticker"], x["side"]), "sell", x["count"], bid)
             if filled:
