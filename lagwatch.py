@@ -80,7 +80,9 @@ class LagWatch:
     def discover(self) -> None:
         """Find every Polymarket sports market that the bot can match to Kalshi."""
         now = time.time()
-        found, scanned = 0, 0
+        found, scanned, in_window = 0, 0, 0
+        from collections import Counter
+        why = Counter()
         pairs = self.bot.__dict__.setdefault("pairs", {})
         for offset in range(0, int(self.cfg.get("discover_max_events", 600)), 100):
             try:
@@ -98,16 +100,22 @@ class LagWatch:
                     scanned += 1
                     start = self._start(m, ev)
                     if not start or not (now - 4 * 3600 <= start <= now + 12 * 3600):
+                        why["no start" if not start else "not today"] += 1
                         continue
+                    in_window += 1
                     outs, toks = _jl(m.get("outcomes")), _jl(m.get("clobTokenIds"))
                     for i, (o, tok) in enumerate(zip(outs, toks)):
                         t = {"slug": m.get("slug"), "eventSlug": ev.get("slug"), "title": m.get("question") or ev.get("title"),
                              "outcome": o, "outcomeIndex": i, "conditionId": m.get("conditionId")}
                         try:
-                            hit, _ = self.bot.sports.lookup(t)
-                        except Exception:
-                            hit = None
+                            hit, reason = self.bot.sports.lookup(t)
+                        except Exception as e:
+                            hit, reason = None, f"error {type(e).__name__}"
                         if not hit:
+                            why[str(reason)[:50]] += 1
+                            if len(self.__dict__.setdefault("_samples", [])) < 5:
+                                self._samples.append({"slug": t["slug"], "eventSlug": t["eventSlug"], "title": t["title"],
+                                                      "outcome": o, "reason": str(reason)[:60]})
                             continue
                         key = f'{hit["ticker"]}|{hit["side"]}'
                         p = pairs.setdefault(key, {"cond": t["conditionId"], "outcome": str(o), "ticker": hit["ticker"],
@@ -115,8 +123,9 @@ class LagWatch:
                         p.update(start=start, token=str(tok), seen=now)
                         found += 1
             time.sleep(0.3)
-        log.info("LAGWATCH discovery: %d Polymarket markets scanned, %d matched to Kalshi (%d pairs tracked)",
-                 scanned, found, len(pairs))
+        log.info("LAGWATCH discovery: %d Polymarket markets scanned, %d in the next 12h, %d matched to Kalshi "
+                 "(%d pairs tracked); misses %s; samples %s", scanned, in_window, found, len(pairs),
+                 why.most_common(6), json.dumps(getattr(self, "_samples", []))[:900])
 
     def _safe_discover(self) -> None:
         try:
@@ -199,7 +208,7 @@ class LagWatch:
                 except Exception:
                     continue
             st, tok = p.get("start"), p.get("token")
-            if not st or not tok:
+            if not st or not tok or p.get("bad", 0) >= 2:
                 continue
             if st <= now <= st + 4 * 3600:
                 live.append(p)
@@ -239,11 +248,20 @@ class LagWatch:
             return
         pm_mid = (bid + ask) / 2
         k_ask, k_bid = _px(m, f'{p["side"]}_ask'), _px(m, f'{p["side"]}_bid')
-        if not k_ask or k_ask <= 0.02 or k_ask >= 0.98:
-            return
+        if not k_ask or k_ask <= 0.05 or k_ask > float(self.cfg.get("max_price", 0.92)):
+            return  # near-certain or near-dead: no room, and end-of-game prices jump
         key = f'{p["ticker"]}|{p["side"]}'
         grp = self.group_of(p, is_live)
         gap = pm_mid - k_ask - self._fee(k_ask, rate)
+        k_mid = (k_ask + k_bid) / 2 if k_bid else k_ask
+        if gap > float(self.cfg.get("max_gap", 0.15)) or abs(pm_mid - k_mid) > 0.20:
+            # far too big to be lag: the two markets aren't the same bet (or one is stale/settling)
+            p["bad"] = p.get("bad", 0) + 1
+            if p["bad"] == 1:
+                log.info("LAGWATCH ignoring %s %s: Kalshi %.2f vs Polymarket %.3f looks like a different bet",
+                         p["ticker"], p["side"].upper(), k_ask, pm_mid)
+            self.open.pop(key, None)
+            return
         g = self.open.get(key)
         if gap >= margin:
             if not g:
