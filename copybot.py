@@ -221,7 +221,11 @@ class Polymarket:
         self.s = session
 
     def trades(self, wallet: str, limit: int = 50) -> list[dict]:
-        r = self.s.get(f"{POLY_DATA}/trades", params={"user": wallet, "limit": limit}, timeout=15)
+        for attempt in range(3):  # Polymarket rate limit: wait and retry
+            r = self.s.get(f"{POLY_DATA}/trades", params={"user": wallet, "limit": limit}, timeout=15)
+            if r.status_code != 429:
+                break
+            time.sleep(1.5 * (attempt + 1))
         r.raise_for_status()
         data = r.json()
         return data if isinstance(data, list) else data.get("data", [])
@@ -379,8 +383,12 @@ class Kalshi:
         }
 
     def _req(self, method: str, path: str, **kw) -> dict:
-        r = self.s.request(method, self.base + path,
-                           headers=self._headers(method, path), timeout=15, **kw)
+        for attempt in range(4):  # back off on Kalshi rate limits (429) instead of failing the step
+            r = self.s.request(method, self.base + path,
+                               headers=self._headers(method, path), timeout=15, **kw)
+            if r.status_code != 429 or attempt == 3:
+                break
+            time.sleep(0.6 * (attempt + 1))
         if r.status_code >= 400:
             raise RuntimeError(f"Kalshi {method} {path} -> {r.status_code}: {r.text[:300]}")
         if r.status_code == 204 or not r.content.strip():
