@@ -416,8 +416,10 @@ class MarketMaker:
                    "bid above value" if (bid >= value + 0.01 and net > 0) else
                    "locking profit near close" if (left <= float(self.cfg.get("lock_last_s", 240)) and net >= 0.01) else
                    why_l)
-            if not why and left >= 300 and value <= 0.5 * avg and bid >= 0.75 * value:
+            if not why and left >= 90 and value <= 0.5 * avg and bid >= 0.75 * value:
                 why = f"model stop: worth {value:.2f} vs cost {avg:.2f}"
+            if not why and left <= 240 and value < 0.25 and bid >= 0.75 * value and bid >= 0.02:
+                why = f"late exit: probably losing (worth {value:.2f}), someone pays {bid:.2f}"
             if not why:
                 continue
             if time.time() < st.get("sell_wait", 0):
