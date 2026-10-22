@@ -304,6 +304,12 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
 <div><div class="k">Upcoming watched</div><div class="v">{{ lw.pre_watched or 0 }}</div></div>
 <div><div class="k">Gaps seen</div><div class="v">{{ lw.gaps or 0 }}</div></div>
 <div><div class="k">Profitable after fees</div><div class="v">{{ lw.converged or 0 }}</div></div></div>
+{% set lp = st.lag_pnl or {} %}
+<div class="grid" style="margin-top:10px"><div><div class="k">Lag trades done</div><div class="v">{{ lp.trades or 0 }}{% if lp.trades %} <span class="k">({{ lp.wins }} won)</span>{% endif %}</div></div>
+<div><div class="k">Lag profit (after fees)</div><div class="v {{ 'ok' if (lp.pnl or 0) > 0 else ('bad' if (lp.pnl or 0) < 0 else '') }}">{{ '-' if (lp.pnl or 0) < 0 }}${{ '%.2f'|format((lp.pnl or 0)|abs) }}</div></div>
+<div><div class="k">Open lag trades</div><div class="v">{{ lp.open or 0 }} <span class="k">(${{ '%.2f'|format(lp.open_cost or 0) }})</span></div></div>
+<div><div class="k">Cash ready for lag</div><div class="v">${{ '%.2f'|format(lp.reserve_free or 0) }}</div></div></div>
+{% if lp.by %}<div class="k" style="margin-top:4px">{% for n, g in lp.by|dictsort %}{{ n }}: {{ g.trades }} trades, {{ '-' if g.pnl < 0 }}${{ '%.2f'|format(g.pnl|abs) }}{% if not loop.last %} · {% endif %}{% endfor %}</div>{% endif %}
 {% if lw.groups %}<div class="scroll" style="margin-top:8px"><table><tr><th>League</th><th>Status</th><th>Gaps</th><th>Profitable</th><th>Games</th></tr>
 {% for name, g in lw.groups|dictsort %}<tr><td>{{ name }}</td><td class="{{ 'ok' if g.mode == 'trade' else '' }}"><b>{{ 'TRADING' if g.mode == 'trade' else 'watching' }}</b></td><td>{{ g.gaps }}</td><td>{{ (100*g.converged/g.gaps)|round|int if g.gaps else 0 }}%</td><td>{{ g.games|length }}</td></tr>{% endfor %}
 </table></div>{% endif %}

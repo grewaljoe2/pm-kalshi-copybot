@@ -1035,6 +1035,25 @@ class CopyBot:
         in_use = sum(x["count"] * x["entry"] for x in lw.get("trades", []))
         return max(0.0, self.equity() * float(lc.get("reserve_pct", 0.10)) - in_use)
 
+    def lag_pnl(self) -> dict:
+        """Results of lag trades: realized profit, wins, open positions (overall and per league)."""
+        out = {"trades": 0, "wins": 0, "pnl": 0.0, "fees": 0.0, "open": 0, "open_cost": 0.0, "by": {}}
+        for c in self.state.data.get("closed", []):
+            if not str(c.get("whale", "")).startswith("Lag trade"):
+                continue
+            g = out["by"].setdefault(c["whale"].replace("Lag trade · ", "") or "?", {"trades": 0, "wins": 0, "pnl": 0.0})
+            for d in (out, g):
+                d["trades"] += 1
+                d["wins"] += 1 if c["pnl"] > 0 else 0
+                d["pnl"] = round(d["pnl"] + c["pnl"], 2)
+            out["fees"] = round(out["fees"] + c.get("fees", 0), 2)
+        for l in self.state.data.get("lots", []):
+            if str(l.get("whale", "")).startswith("Lag trade") and l.get("count", 0) > 0:
+                out["open"] += 1
+                out["open_cost"] = round(out["open_cost"] + l["cost"], 2)
+        out["reserve_free"] = round(min(self.lag_reserve(), max(0.0, self.cash())), 2)
+        return out
+
     def spendable_cash(self) -> float:
         """Free cash for whale copies, board picks and parlays (the lag reserve is set aside)."""
         return self.cash() - self.lag_reserve()
@@ -2083,6 +2102,7 @@ class CopyBot:
             "start_usd": float(self.bank.get("start_usd", 100)),
             "stage": self.current_stage().get("name"),
             "lagwatch": self.state.data.get("lagwatch") or {},
+            "lag_pnl": self.lag_pnl(),
             "stage_tiers": self.current_tiers(),
             "peak": self.state.data.get("peak_equity"),
             "sizing": self.risk.get("sizing"),

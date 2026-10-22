@@ -75,6 +75,8 @@ class LagWatch:
                                        "games": list(set(st.get("games", []))), "mode": "trade",
                                        "switched_at": st.get("switched_at")}
         self.stats = st
+        for name in list(st["groups"]):  # settings may have changed: re-check every league now
+            self._maybe_switch(name)
 
     # ---- discovery ---------------------------------------------------------- #
     def discover(self) -> None:

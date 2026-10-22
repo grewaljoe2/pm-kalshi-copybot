@@ -79,7 +79,7 @@ lag_watch:
   mode: watch               # starts measuring only; switches itself to trade when the evidence is in
   auto_switch: true
   min_gaps: 8               # evidence needed: at least 8 gaps
-  min_games: 3              #   across at least 3 different games
+  min_games: 2              #   across at least 2 different games
   min_converge_rate: 0.6    #   and 60%+ could have been sold for 1c+ profit after both fees
   poll_seconds: 5
   min_gap: 0.03             # Kalshi at least 3c cheaper than Polymarket after the fee
