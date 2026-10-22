@@ -162,6 +162,8 @@ class MarketMaker:
             known.pop(k, None)
         if oid in known:
             return  # our tracked quote: the normal order poll books it
+        if str(f.get("is_taker")).lower() in ("true", "1"):
+            return  # our own taker orders (pair completion, exits) are booked where they're sent; quotes are always maker
         n = int(float(f.get("count_fp") or f.get("count") or 0))
         if n <= 0:
             return
