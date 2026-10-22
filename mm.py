@@ -159,6 +159,7 @@ class MarketMaker:
             st["last_poll"] = now
             self._poll_fills(tk, st)
         c = self.cfg
+        self._sync_inv(tk, st)
         self._take_profit(tk, st, fair, q, m["close"] - now)
         hs, size = float(c.get("half_spread", 0.03)), int(c.get("size", 5))
         inv_y, inv_n = st["inv"]["yes"][0], st["inv"]["no"][0]
@@ -215,6 +216,21 @@ class MarketMaker:
                 self.__dict__.setdefault("_last_gate", {})[st["coin"]] = f"no cash (${free:.2f} free)"
                 continue
             self._place(tk, st, side, n, px, m)
+
+    def _sync_inv(self, tk, st) -> None:
+        """Holdings always match the records (which match Kalshi after reconcile + netting),
+        including positions recovered after a restart."""
+        if self.bot.ledger_queue:  # our own fills/sales aren't in the records yet; keep local counts
+            return
+        d = {"yes": [0, 0.0], "no": [0, 0.0]}
+        for l in list(self.bot.state.data.get("lots", [])):
+            if l["ticker"] == tk and l.get("count", 0) > 0:
+                d[l["side"]][0] += l["count"]
+                d[l["side"]][1] += l["cost"]
+        if (d["yes"][0], d["no"][0]) != (st["inv"]["yes"][0], st["inv"]["no"][0]):
+            log.info("MM holdings %s synced to records: YES %d / NO %d (was %d / %d)", tk, d["yes"][0], d["no"][0],
+                     st["inv"]["yes"][0], st["inv"]["no"][0])
+        st["inv"] = d
 
     def _take_profit(self, tk, st, fair, q, left) -> None:
         """One-sided holdings that are up: sell instead of riding them to settlement.
