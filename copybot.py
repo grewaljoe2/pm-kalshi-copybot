@@ -1306,9 +1306,11 @@ class CopyBot:
         from copybot import _today
         base = self.state.data.setdefault("truth_base", {})
         day = _today()
+        rid = str(((self.cfg.get("crypto_lag") or {}).get("mm") or {}).get("truth_reset", "")) if key == "mm" else \
+            str((self.cfg.get("lag_watch") or {}).get("truth_reset", ""))
         b = base.get(key)
-        if not b or b.get("day") != day:
-            b = base[key] = {"day": day, "v": v}
+        if not b or b.get("day") != day or b.get("rid", "") != rid:  # new day, or a manual reset in config
+            b = base[key] = {"day": day, "v": v, "rid": rid}
             log.info("Kalshi baseline for %s today: %+.2f (limits count from here)", key, v)
         return v - b["v"]
 

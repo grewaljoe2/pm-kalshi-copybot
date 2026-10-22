@@ -206,7 +206,7 @@ class MarketMaker:
 
     def truth_stop(self, now: float) -> bool:
         """Off switch on Kalshi's real numbers: market maker down kill_usd today (after fees) -> no new quotes."""
-        if now - getattr(self, "_truth_t", 0) < 300:
+        if now - getattr(self, "_truth_t", 0) < (60 if getattr(self, "_truth_off", False) else 300):
             return getattr(self, "_truth_off", False)
         self._truth_t = now
         v = self.bot.truth_since_start("mm", tuple(self.coins()))
