@@ -161,7 +161,11 @@ class MarketMaker:
         for k in [k for k, t in known.items() if time.time() - t > 1800]:
             known.pop(k, None)
         if oid in known:
-            return  # our tracked quote: the normal order poll books it
+            for st in self.mk.values():  # our tracked quote: poll it on the very next tick instead of within 2s
+                if any(o.get("id") == oid for o in st.get("orders", {}).values()):
+                    st["last_poll"] = 0
+                    st["ws_fill_t"] = time.time()
+            return
         if str(f.get("is_taker")).lower() in ("true", "1"):
             return  # our own taker orders (pair completion, exits) are booked where they're sent; quotes are always maker
         n = int(float(f.get("count_fp") or f.get("count") or 0))
@@ -419,8 +423,9 @@ class MarketMaker:
             f, pr = self.bot._execute(Target(tk, other), "buy", k, oa)
             if f:
                 self._on_fill(tk, st, other, f, pr / f, commit=False)
-                log.info("MM pair completed at once %s: %s %.2f + %s %.2f + fee -> %+.1fc each", tk, held.upper(), avg,
-                         other.upper(), oa, 100 * (1 - avg - oa - fee(oa)))
+                rt = time.time() - st.get("ws_fill_t", time.time())
+                log.info("MM pair completed at once %s: %s %.2f + %s %.2f + fee -> %+.1fc each (%.1fs after the fill)", tk,
+                         held.upper(), avg, other.upper(), oa, 100 * (1 - avg - oa - fee(oa)), rt)
                 st.pop("single_t", None)
                 return True
         t0 = st.setdefault("single_t", now)

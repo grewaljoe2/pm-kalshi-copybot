@@ -316,9 +316,17 @@ class CryptoLag:
         every = float(self.cfg.get("poll_seconds", 1))
         time.sleep(20)
         while not stop.is_set():
+            t0 = time.time()
             try:
                 if not self.bot.paused:
                     self.tick()
             except Exception as e:
                 log.warning("crypto tick failed: %s", e)
-            stop.wait(every)
+            took = time.time() - t0
+            sp = self.__dict__.setdefault("_speed", {"n": 0, "sum": 0.0, "max": 0.0, "slow": 0, "t": time.time()})
+            sp["n"] += 1; sp["sum"] += took; sp["max"] = max(sp["max"], took); sp["slow"] += took > 1.0
+            if time.time() - sp["t"] >= 600:
+                log.info("SPEED crypto loop: %d rounds, avg %.0f ms, max %.1f s, %d over 1s (target every %.2fs)",
+                         sp["n"], 1000 * sp["sum"] / max(1, sp["n"]), sp["max"], sp["slow"], every)
+                self._speed = {"n": 0, "sum": 0.0, "max": 0.0, "slow": 0, "t": time.time()}
+            stop.wait(max(0.0, every - took))
