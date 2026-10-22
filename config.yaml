@@ -146,6 +146,7 @@ crypto_lag:
     stop_before_close_s: 180
     expire_before_close_s: 150  # Kalshi cancels our quotes itself 2.5 min before close
     daily_stop_usd: 8       # stop quoting for the day after losing $8
+    paused: true            # no new quotes (hidden-fill bug being fixed); still sells/stops what it holds
     take_profit_pct: 0.5    # one-sided holding up 50%+ on cost: sell it
     lock_last_s: 240        # last 4 minutes: sell any one-sided holding that's in profit after the fee
 

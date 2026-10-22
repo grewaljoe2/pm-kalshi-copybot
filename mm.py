@@ -156,6 +156,30 @@ class MarketMaker:
         except Exception as e:
             log.warning("MM orphan check failed: %s", e)
 
+    def sweep(self, now: float) -> None:
+        """Every 20s: any resting order of ours on a market-maker market that we aren't tracking (a cancel
+        that didn't really go through, or a quote left from a restart) gets cancelled and checked."""
+        if now - getattr(self, "_last_sweep", 0) < 20:
+            return
+        self._last_sweep = now
+        try:
+            tracked = {o["id"] for st in self.mk.values() for o in st.get("orders", {}).values()}
+            j = self.bot.kalshi._req("GET", "/portfolio/orders", params={"status": "resting", "limit": 200})
+            for o in j.get("orders") or []:
+                tk, oid = o.get("ticker") or "", o.get("order_id")
+                if not self.covers(tk) or oid in tracked:
+                    continue
+                try:
+                    self.bot.kalshi.cancel_order(oid, tk)
+                    left = self.bot.kalshi._req("GET", f"/portfolio/orders/{oid}").get("order", {}).get("status")
+                    log.info("MM swept stray quote %s on %s (now %s)", oid, tk, left)
+                    if left == "resting":
+                        self.bot.kalshi._req("DELETE", f"/portfolio/orders/{oid}")
+                except Exception as e:
+                    log.warning("MM sweep cancel failed %s: %s", oid, str(e)[:120])
+        except Exception as e:
+            log.warning("MM sweep failed: %s", str(e)[:120])
+
     def status(self, now: float) -> None:
         if now - getattr(self, "_last_status", 0) < 60:
             return
@@ -175,6 +199,13 @@ class MarketMaker:
         st = self.mk.setdefault(tk, {"orders": {}, "inv": {"yes": [0, 0.0], "no": [0, 0.0]}, "last_poll": 0.0,
                                      "coin": m["prod"].split("-")[0], "close": m["close"], "ticker": tk})
         st["close"] = m["close"]
+        self.sweep(now)
+        if self.cfg.get("paused"):  # no new quotes; still manage what we hold
+            for side in list(st["orders"]):
+                self._cancel(tk, st, side, "paused")
+            self._sync_inv(tk, st)
+            self._take_profit(tk, st, fair, q, m["close"] - now)
+            return
         if now - st["last_poll"] >= float(self.cfg.get("poll_s", 2)):
             st["last_poll"] = now
             self._poll_fills(tk, st)
@@ -329,8 +360,15 @@ class MarketMaker:
             if "not found" not in msg and "404" not in msg and "executed" not in msg:
                 log.info("MM cancel failed %s %s: %s", tk, side, str(e)[:120])
                 return
+        try:  # make sure it's really gone: a "successful" cancel call doesn't always cancel
+            if self.bot.kalshi._req("GET", f'/portfolio/orders/{o["id"]}').get("order", {}).get("status") == "resting":
+                self.bot.kalshi._req("DELETE", f'/portfolio/orders/{o["id"]}')
+                log.info("MM cancel didn't take on %s %s, retried", tk, side)
+        except Exception:
+            pass
         self._poll_one(tk, st, side)  # catch any fill that happened before the cancel
-        st["orders"].pop(side, None)
+        if st["orders"].get(side) is o:
+            st["orders"].pop(side, None)
 
     def _poll_fills(self, tk, st) -> None:
         for side in list(st["orders"]):
