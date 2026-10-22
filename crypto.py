@@ -102,16 +102,19 @@ class CoinStream:
                 time.sleep(3)
 
 
-SERIES = {  # Kalshi series -> (coin product, kind)
+SERIES = {  # Kalshi series -> (coin product, kind); series Kalshi doesn't list are simply skipped
     "KXBTC15M": ("BTC-USD", "15m"), "KXETH15M": ("ETH-USD", "15m"),
     "KXBTCD": ("BTC-USD", "hourly"), "KXETHD": ("ETH-USD", "hourly"),
+    "KXSOL15M": ("SOL-USD", "15m"), "KXXRP15M": ("XRP-USD", "15m"), "KXDOGE15M": ("DOGE-USD", "15m"),
+    "KXSOLD": ("SOL-USD", "hourly"), "KXXRPD": ("XRP-USD", "hourly"), "KXDOGED": ("DOGE-USD", "hourly"),
 }
+COINS = tuple(sorted({p.split("-")[0] for p, _ in SERIES.values()}))
 
 
 class CryptoLag:
     def __init__(self, bot, lagwatch, stream, cfg: dict):
         self.bot, self.lw, self.ks, self.cfg = bot, lagwatch, stream, cfg or {}
-        self.coins = CoinStream().start()
+        self.coins = CoinStream(tuple(sorted({p for p, _ in SERIES.values()}))).start()
         self.markets: dict[str, dict] = {}
         self._last_disc = 0.0
         self._logged_series: set[str] = set()
@@ -196,14 +199,19 @@ class CryptoLag:
             self.discover()
         rate = getattr(self.bot, "fee_rate", 0.07)
         margin = float(self.cfg.get("min_gap", 0.04))
+        exit_s = float(self.cfg.get("exit_seconds", 150))
         for tk, m in list(self.markets.items()):
-            if m["close"] - now < 45:
+            if m["close"] <= now:
                 continue
             q = self.ks.quote(tk) if self.ks else None
             if not q or q.get("yes_ask") is None or q.get("yes_bid") is None:
                 continue
             fy = self.fair_yes(m)
             if fy is None:
+                continue
+            if m["close"] - now <= exit_s:  # last minutes: get out of trades that are going wrong
+                self.lw.exit_late(tk, fy, q["yes_bid"], q["yes_ask"], rate, float(self.cfg.get("exit_below", 0.40)))
+            if m["close"] - now < 45:
                 continue
             kind = "15m" if m["kind"] == "15m" else "hourly"
             grp = f'{m["prod"].split("-")[0]} {kind}'

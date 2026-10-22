@@ -135,6 +135,82 @@ def _mem_watch():
 _register("mem-watch", _mem_watch)
 
 
+def _strategy(whale: str) -> str:
+    w = str(whale or "")
+    if w.startswith("Lag trade"):
+        return "lag"
+    if w.startswith("Combo"):
+        return "parlays"
+    if w in ("Recovered", "Board", "Best bets") or w.startswith("Board"):
+        return "other"
+    return "whales"
+
+
+def daily_report(day: str | None = None) -> dict:
+    """Yesterday's results by strategy and by whale, plus totals and where the money is now."""
+    from datetime import datetime, timezone, timedelta
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(copybot.LOCAL_TZ)
+    day = day or (datetime.now(tz) - timedelta(days=1)).strftime("%Y-%m-%d")
+    data = BOT.state.data
+    by, whales, total = {}, {}, {"pnl": 0.0, "n": 0, "wins": 0}
+    for c in data.get("closed", []):
+        d = datetime.fromtimestamp(c.get("closed", 0), timezone.utc).astimezone(tz).strftime("%Y-%m-%d")
+        if d != day:
+            continue
+        s = _strategy(c.get("whale"))
+        for bucket in (by.setdefault(s, {"pnl": 0.0, "n": 0, "wins": 0, "staked": 0.0}), total):
+            bucket["pnl"] += c["pnl"]
+            bucket["n"] += 1
+            bucket["wins"] += 1 if c["pnl"] > 0 else 0
+        by[s]["staked"] += c.get("cost", 0)
+        if s == "whales":
+            w = whales.setdefault(c["whale"], {"pnl": 0.0, "n": 0, "wins": 0})
+            w["pnl"] += c["pnl"]; w["n"] += 1; w["wins"] += 1 if c["pnl"] > 0 else 0
+    for d in list(by.values()) + list(whales.values()) + [total]:
+        d["pnl"] = round(d["pnl"], 2)
+        if "staked" in d:
+            d["roi_pct"] = round(100 * d["pnl"] / d["staked"], 1) if d["staked"] else None
+            d["staked"] = round(d["staked"], 2)
+    alltime = {}
+    for c in data.get("closed", []):
+        s = _strategy(c.get("whale"))
+        alltime[s] = round(alltime.get(s, 0.0) + c["pnl"], 2)
+    lw = data.get("lagwatch") or {}
+    lag_levels = (copybot.load_yaml(os.environ.get("CONFIG_PATH", "config.yaml")).get("lag_watch", {}) or {}).get(
+        "size_levels") or [0.05]
+    return {"day": day, "total": total, "by_strategy": by,
+            "whales": dict(sorted(whales.items(), key=lambda kv: -kv[1]["pnl"])),
+            "all_time_pnl": alltime, "equity": round(BOT.equity(), 2), "cash_free": round(BOT.cash(), 2),
+            "start_usd": float(BOT.bank.get("start_usd", 0)),
+            "reserve_ready": BOT.reserve_free(), "pot_free": BOT.pot_free(), "pot_in_bets": round(BOT.pot_open(), 2),
+            "open_bets": len(data.get("lots", [])),
+            "lag_trading_groups": sorted(k for k, v in (lw.get("groups") or {}).items() if v.get("mode") == "trade"),
+            "lag_size_pct": 100 * float(lag_levels[min(int(lw.get("size_level", 0)), len(lag_levels) - 1)])}
+
+
+def _daily_report_loop():
+    import json
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    time.sleep(120)
+    while True:
+        try:
+            now = datetime.now(ZoneInfo(copybot.LOCAL_TZ))
+            st = BOT.state.data if BOT is not None else {}
+            if BOT is not None and now.hour >= 7 and st.get("daily_report_day") != now.strftime("%Y-%m-%d"):
+                rep = daily_report()
+                log.info("DAILY_REPORT %s", json.dumps(rep, default=str))
+                st["daily_report_day"] = now.strftime("%Y-%m-%d")
+                st["daily_report"] = rep
+        except Exception as e:
+            log.warning("daily report failed: %s", e)
+        time.sleep(300)
+
+
+_register("daily-report", _daily_report_loop)
+
+
 # ---- player props (rated from ESPN game logs, refreshed every 30 min) ------- #
 PROPS: dict = {"picks": [], "updated": None, "error": None}
 

@@ -401,9 +401,11 @@ class LagWatch:
             return
         bot = self.bot
         eq = bot.equity()
+        pct, max_open, why = self.sizing(eq)
+        if why:
+            return
         open_cost = sum(x["count"] * x["entry"] for x in self.stats["trades"])
-        stake = min(eq * float(self.cfg.get("stake_pct", 0.03)),
-                    eq * float(self.cfg.get("max_open_pct", 0.10)) - open_cost,
+        stake = min(eq * pct, eq * max_open - open_cost,
                     bot.cash() - bot.pot_cash() - 0.5)  # main + reserve, never the future pot
         n = int(stake // ask) if stake > 0 else 0
         if n < 1:
@@ -437,6 +439,76 @@ class LagWatch:
                                      "group": grp, "close": p.get("close")})
         log.info("LAGTRADE [%s] BUY %d %s %s @ %.2f (Polymarket %.3f)", grp, filled, p["ticker"],
                  p["side"].upper(), px, pm_mid)
+
+    # ---- sizing that follows results --------------------------------------------- #
+    def day_pnl(self, day: str) -> tuple[float, int]:
+        from copybot import _local_day
+        from datetime import datetime, timezone
+        pnl, n = 0.0, 0
+        for c in self.bot.state.data.get("closed", []):
+            if str(c.get("whale", "")).startswith("Lag trade"):
+                d = _local_day(datetime.fromtimestamp(c.get("closed", 0), timezone.utc).isoformat())
+                if d == day:
+                    pnl += c.get("pnl", 0)
+                    n += 1
+        return pnl, n
+
+    def sizing(self, eq: float) -> tuple[float, float, str | None]:
+        """Stake per trade steps up after profitable days and down after losing days.
+        Lag buying stops for the day after losing lag_daily_stop of the balance."""
+        from copybot import _today
+        from datetime import datetime, timedelta
+        levels = [float(x) for x in (self.cfg.get("size_levels") or [0.05, 0.065, 0.08])]
+        st = self.stats
+        today = _today()
+        if st.get("size_day") != today:
+            if st.get("size_day"):
+                pnl, n = self.day_pnl(st["size_day"])
+                lvl = int(st.get("size_level", 0))
+                if pnl > 0 and n >= int(self.cfg.get("size_up_min_trades", 10)):
+                    lvl += 1
+                elif pnl < 0:
+                    lvl -= 1
+                st["size_level"] = max(0, min(len(levels) - 1, lvl))
+                log.warning("LAGWATCH sizing: %s lag P&L $%.2f over %d trades -> %.1f%% per trade",
+                            st["size_day"], pnl, n, 100 * levels[st["size_level"]])
+            st["size_day"] = today
+        pct = levels[max(0, min(len(levels) - 1, int(st.get("size_level", 0))))]
+        max_open = pct * float(self.cfg.get("max_open_trades", 3))
+        pnl_today, _ = self.day_pnl(today)
+        if pnl_today < -eq * float(self.cfg.get("daily_stop_pct", 0.05)):
+            if st.get("stopped_day") != today:
+                st["stopped_day"] = today
+                log.warning("LAGWATCH daily loss stop: lag trades down $%.2f today, paused until tomorrow", -pnl_today)
+            return pct, max_open, "daily stop"
+        return pct, max_open, None
+
+    # ---- exits ------------------------------------------------------------------ #
+    def _sell(self, x: dict, bid: float, rate: float, why: str) -> None:
+        from copybot import Target
+        filled, proceeds = self.bot._execute(Target(x["ticker"], x["side"]), "sell", x["count"], bid)
+        if filled:
+            px = proceeds / filled
+            self.bot.ledger_queue.append(("close", f"Lag trade · {x.get('group', '')}", x["ticker"], x["side"],
+                                          filled, px, x["title"]))
+            log.info("LAGTRADE SELL %d %s %s @ %.2f (bought %.2f, %+.1fc each after fees) %s", filled, x["ticker"],
+                     x["side"].upper(), px, x["entry"], 100 * self._net(x["entry"], px, rate), why)
+            x["count"] -= filled
+        if x["count"] <= 0 and x in self.stats["trades"]:
+            self.stats["trades"].remove(x)
+
+    def exit_late(self, ticker: str, fair_yes: float, yes_bid: float, yes_ask: float, rate: float,
+                  exit_below: float) -> None:
+        """Last minutes of a crypto window: sell a trade that's probably losing (our model now gives
+        it under exit_below) or when the market pays more than it's worth, instead of riding it to 0."""
+        with self.lock:
+            for x in [x for x in self.stats["trades"] if x["ticker"] == ticker]:
+                fair = fair_yes if x["side"] == "yes" else 1 - fair_yes
+                bid = yes_bid if x["side"] == "yes" else 1 - yes_ask
+                if bid < 0.02:
+                    continue
+                if fair < exit_below or bid >= fair:
+                    self._sell(x, bid, rate, f"(late exit: worth {fair:.2f}, bid {bid:.2f})")
 
     def _maybe_sell(self, key: str, bid: float, rate: float) -> None:
         from copybot import Target
@@ -486,7 +558,7 @@ class LagWatch:
         if g.get("mode") != "watch" or not c.get("auto_switch", True):
             return
         n, conv, games = g["gaps"], g["converged"], len(g.get("games", []))
-        crypto = name.split(" ")[0] in ("BTC", "ETH")  # model-priced: needs far more evidence
+        crypto = name.split(" ")[0] in ("BTC", "ETH", "SOL", "XRP", "DOGE")  # model-priced: needs far more evidence
         need_gaps = int(c.get("crypto_min_gaps", 30) if crypto else c.get("min_gaps", 8))
         need_games = int(c.get("crypto_min_games", 8) if crypto else c.get("min_games", 3))
         if (n >= need_gaps and conv / max(1, n) >= float(c.get("min_converge_rate", 0.6))
