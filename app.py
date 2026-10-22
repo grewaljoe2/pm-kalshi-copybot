@@ -135,6 +135,50 @@ def _mem_watch():
 _register("mem-watch", _mem_watch)
 
 
+def _kalshi_pnl_audit():
+    """Truth check: Kalshi's own realized profit per crypto 15m market (both sides, pairs, sales and
+    settlement, after fees), today. Logged every 30 min as KALSHI_PNL."""
+    import json
+    time.sleep(120)
+    while True:
+        try:
+            k = BOT.kalshi
+            rows, cur = [], None
+            for _ in range(10):
+                p = {"limit": 200, "settlement_status": "all"}
+                if cur:
+                    p["cursor"] = cur
+                j = k._req("GET", "/portfolio/positions", params=p)
+                rows += j.get("market_positions") or []
+                cur = j.get("cursor")
+                if not cur:
+                    break
+            day = time.strftime("%y%b%d", time.gmtime(time.time() - 4 * 3600)).upper()  # Kalshi tickers use ET dates
+            out, tot = {}, {}
+            for r in rows:
+                tk = r.get("ticker") or ""
+                if "15M-" not in tk or day not in tk:
+                    continue
+                pnl = float(r.get("realized_pnl_dollars") or 0)
+                fee = float(r.get("fees_paid_dollars") or 0)
+                coin = tk[2:].split("15M")[0]
+                out[tk[-14:] + " " + coin] = round(pnl, 2)
+                t = tot.setdefault(coin, [0.0, 0.0, 0])
+                t[0] += pnl; t[1] += fee; t[2] += 1
+            log.info("KALSHI_PNL today by coin (realized after fees, fees, markets): %s | total %+.2f",
+                     json.dumps({c: [round(v[0], 2), round(v[1], 2), v[2]] for c, v in tot.items()}),
+                     sum(v[0] for v in tot.values()))
+            log.info("KALSHI_PNL per market: %s", json.dumps(out))
+            if rows:
+                log.info("KALSHI_PNL fields: %s", sorted(rows[0].keys()))
+        except Exception as e:
+            log.warning("KALSHI_PNL failed: %s", e)
+        time.sleep(1800)
+
+
+_register("kalshi-pnl", _kalshi_pnl_audit)
+
+
 def trades_with_pnl(n: int = 40) -> list[dict]:
     """Copied-trades table with profit/loss: sells and settlements show what they made after fees;
     buys show 'open' while held, 'closed' once sold or settled."""
