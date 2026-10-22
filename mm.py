@@ -177,10 +177,11 @@ class MarketMaker:
                 if st["orders"].get(side):
                     continue  # cancel failed: try again next tick
             n = size
-            if inv_y != inv_n and ((side == "no" and inv_y > inv_n) or (side == "yes" and inv_n > inv_y)):
+            closing = inv_y != inv_n and ((side == "no" and inv_y > inv_n) or (side == "yes" and inv_n > inv_y))
+            if closing:
                 n = max(1, min(size, abs(net)))  # just enough to complete the pair
             free = self.bot.cash() - 0.5  # may use the future pot's idle cash: it comes back within 15 min
-            if free - n * px < 0.5:
+            if not closing and free - n * px < 0.5:  # completing a pair needs no cash (Kalshi nets it)
                 self.__dict__.setdefault("_last_gate", {})[st["coin"]] = f"no cash (${free:.2f} free)"
                 continue
             self._place(tk, st, side, n, px, m)
