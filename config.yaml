@@ -119,7 +119,7 @@ crypto_lag:
 limit_orders:
   enabled: true
   maker_fee_rate: 0.0175    # conservative: assume the max maker fee
-  max_hours: 6              # order lifetime if the start time is unknown
+  max_hours: 24             # wait up to a day for our price (always cancelled before the game starts)
   cancel_before_start_minutes: 5
   check_seconds: 30
 
@@ -197,6 +197,8 @@ bankroll:
     min_whales: 2           # at least 2 proven traders on the same side
     min_ev: 0.0
     max_age_hours: 12       # only fresh whale bets
+    consensus_min_whales: 3 # 3+ proven traders on the same side...
+    consensus_min_score: 55 #   ...is bet even when no single bet scores 70+
 
 risk:
   sizing: score             # "score" (bankroll % by bet score), "fixed" or "proportional"

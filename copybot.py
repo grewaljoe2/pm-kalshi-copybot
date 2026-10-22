@@ -1383,7 +1383,7 @@ class CopyBot:
         start = start or self._kalshi_start(m)
         before = lim.get("cancel_before_start_minutes", 5) * 60
         expires = int(min(start - before, time.time() + lim.get("max_hours", 6) * 3600) if start
-                      else time.time() + lim.get("max_hours", 6) * 3600)
+                      else time.time() + min(6, lim.get("max_hours", 6)) * 3600)  # unknown start: short
         if expires <= time.time() + 60:
             return self._skip(t, name, "limit: too close to game start")
         if self.mode == "live":
@@ -1492,9 +1492,31 @@ class CopyBot:
         for k in [k for k, ts in done.items() if ts < time.time() - 48 * 3600]:
             del done[k]
         for p in picks:
-            if (p["score"] < bc.get("min_score", 80) or p["whales"] < bc.get("min_whales", 2)
-                    or p["ev"] <= bc.get("min_ev", 0.0)
-                    or time.time() - p.get("latest_ts", 0) > bc.get("max_age_hours", 12) * 3600):
+            if time.time() - p.get("latest_ts", 0) > bc.get("max_age_hours", 12) * 3600:
+                continue
+            # consensus: 3+ proven traders on the same side counts even if no single bet scores high
+            consensus = (p["whales"] >= int(bc.get("consensus_min_whales", 3))
+                         and p["score"] >= float(bc.get("consensus_min_score", 55)))
+            strong = p["score"] >= bc.get("min_score", 80) and p["whales"] >= bc.get("min_whales", 2)
+            if not (strong or consensus):
+                continue
+            if consensus and not strong:  # size it like a solid pick, more with more traders agreeing
+                p = dict(p, score=min(80, max(p["score"], 65 + 5 * (p["whales"] - 3))))
+            if p["ev"] <= bc.get("min_ev", 0.0):
+                # good pick, bad price right now: wait for it with a fair-priced limit order
+                if p.get("status") == "pre" and (self.cfg.get("limit_orders", {}) or {}).get("enabled", False):
+                    key = f'{p["ticker"]}|{p["side"]}'
+                    if key not in done and self.state.position(p["ticker"], p["side"]) <= 0:
+                        try:
+                            m = self.kdata.market(p["ticker"])
+                            ask = _px(m, f'{p["side"]}_ask')
+                            if ask:
+                                t0 = {"title": p["title"], "outcome": p["outcome"], "price": p["whale_px"]}
+                                self._place_resting("Board picks", t0, Target(p["ticker"], p["side"]), p["whale_px"],
+                                                    p.get("whale_usd", 0), None, p["whales"] - 1, 0, ask, m, {})
+                                done[key] = time.time()
+                        except Exception as e:
+                            log.warning("board limit failed: %s", e)
                 continue
             key = f'{p["ticker"]}|{p["side"]}'
             if key in done or self.state.position(p["ticker"], p["side"]) > 0:

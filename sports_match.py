@@ -37,6 +37,19 @@ PREFIX_SERIES: dict[str, list[str]] = {
     "cs2": ["KXCS2GAME"], "lol": ["KXLOLGAME"], "dota2": ["KXDOTA2GAME"], "val": ["KXVALORANTGAME"],
     "atp": ["KXATPMATCH", "KXATPCHALLENGERMATCH"], "wta": ["KXWTAMATCH", "KXWTACHALLENGERMATCH"],
     "ufc": ["KXUFCFIGHT"],
+    # more soccer / basketball / hockey leagues Kalshi lists (Polymarket slug prefix -> Kalshi series)
+    "col1": ["KXDIMAYORGAME"], "col": ["KXDIMAYORGAME"], "lib": ["KXCONMEBOLLIBGAME"],
+    "sud": ["KXCONMEBOLSUDGAME"], "usoc": ["KXUSOPENCUPGAME"], "kor": ["KXKLEAGUEGAME"],
+    "kor1": ["KXKLEAGUEGAME"], "jap": ["KXJLEAGUEGAME"], "j1": ["KXJLEAGUEGAME"], "fr2": ["KXLIGUE2GAME"],
+    "es2": ["KXLALIGA2GAME"], "bl2": ["KXBUNDESLIGA2GAME"], "ita2": ["KXSERIEBGAME"], "itb": ["KXSERIEBGAME"],
+    "tur": ["KXSUPERLIGGAME"], "sco": ["KXSCOTTISHPREMGAME"], "bel": ["KXBELGIANPLGAME"],
+    "den": ["KXDENSUPERLIGAGAME"], "swe": ["KXALLSVENSKANGAME"], "nor": ["KXELITESERIENGAME"],
+    "aus": ["KXALEAGUEGAME"], "egy1": ["KXEGYPLGAME"], "egy": ["KXEGYPLGAME"], "pol": ["KXEKSTRAKLASAGAME"],
+    "gre": ["KXSLGREECEGAME"], "sui": ["KXSWISSLEAGUEGAME"], "aut": ["KXAUTBUNDESGAME"],
+    "chn": ["KXCHNSLGAME"], "nwsl": ["KXNWSLGAME"], "bra2": ["KXBRASILEIROBGAME"],
+    "fac": ["KXFACUPGAME"], "cdr": ["KXCOPADELREYGAME"], "dfb": ["KXDFBPOKALGAME"],
+    "euroleague": ["KXEUROLEAGUEGAME"], "eul": ["KXEUROLEAGUEGAME"], "khl": ["KXKHLGAME"],
+    "kbo": ["KXKBOGAME"], "npb": ["KXNPBGAME"], "cfl": ["KXCFLGAME"], "afl": ["KXAFLGAME"],
 }
 MAP_SERIES = {"cs2": "KXCS2MAP", "lol": "KXLOLMAP", "dota2": "KXDOTA2MAP", "val": "KXVALORANTMAP"}
 
@@ -50,6 +63,19 @@ SPREAD_SERIES = {k: f"KX{v}SPREAD" for k, v in _LEAGUE.items()}
 TOTAL_SERIES = {k: f"KX{v}TOTAL" for k, v in _LEAGUE.items()}
 TOTAL_SERIES.update({"cs2": "KXCS2TOTALMAPS", "lol": "KXLOLTOTALMAPS", "dota2": "KXDOTA2TOTALMAPS",
                      "val": "KXVALORANTTOTALMAPS"})
+
+# First half / first quarter (Kalshi: KXNBA1H, KXNBA1HSPREAD, KXNBA1HTOTAL, ...)
+PERIOD_LEAGUES = {"nba": "NBA", "nfl": "NFL", "cfb": "NCAAF", "ncaaf": "NCAAF", "wnba": "WNBA",
+                  "cbb": "NCAAMB", "ncaab": "NCAAMB"}
+
+# Player props: (league prefix, stat words) -> Kalshi series. Kalshi lines are "N+" (floor N-0.5).
+PROP_SERIES = {
+    "nba": [("pts+reb+ast|points, rebounds|pra", "KXNBAPRA"), ("three|3-point|3pt", "KXNBA3PT"),
+            ("rebound", "KXNBAREB"), ("assist", "KXNBAAST"), ("point", "KXNBAPTS")],
+    "nfl": [("passing yards|pass yds", "KXNFLPASSYDS"), ("passing touchdown|passing td", "KXNFLPASSTDS"),
+            ("rushing yards|rush yds", "KXNFLRSHYDS"), ("receiving yards|rec yds", "KXNFLRECYDS"),
+            ("reception", "KXNFLREC"), ("anytime|touchdown|td", "KXNFLTD")],
+}
 
 # part-game / prop bets we never copy
 SKIP_WORDS = ("btts", "both teams", "exact", "first", "1h", "2h", "half", "quarter", "1st", "2nd",
@@ -147,8 +173,59 @@ class SportsMatcher:
         mg = re.search(r"-game(\d+)$", slug)
         if mg and prefix in MAP_SERIES and "winner" in low:
             return {"prefix": prefix, "date": d, "kind": "map", "map": int(mg.group(1)), "codes": codes}
+        # player props: "LeBron James: Points O/U 25.5" (Over/Under) or "Will X score 25+ points?"
+        if prefix in PROP_SERIES:
+            pr = self._classify_prop(prefix, title, low, rest)
+            if pr:
+                pr.update(prefix=prefix, date=d, codes=codes)
+                return pr
+        # first half / first quarter: same bet types as the full game, on the period's own series
+        period = None
+        if prefix in PERIOD_LEAGUES:
+            if re.search(r"\b(1h|first half|1st half)\b", low) or re.search(r"-1h(-|$)|first-half", rest):
+                period = "1H"
+            elif re.search(r"\b(1q|first quarter|1st quarter)\b", low) or re.search(r"-1q(-|$)|first-quarter", rest):
+                period = "1Q"
+        if period:
+            low_p = re.sub(r"\b(1h|1q|first half|1st half|first quarter|1st quarter)\b", "", low)
+            rest_p = re.sub(r"-(1h|1q|first-half|first-quarter)", "", rest)
+            rest_p = re.sub(r"-(moneyline|winner|ml)$", "", rest_p)
+            if any(w in low_p or w in rest_p for w in SKIP_WORDS):
+                return {"skip": "bet type not copied (part-game / props)"}
+            c = self._classify_main(prefix, d, codes, title, low_p, rest_p)
+            if c and "skip" not in c:
+                c["period"] = period
+            return c
         if any(w in low or w in rest for w in SKIP_WORDS):
             return {"skip": "bet type not copied (part-game / props)"}
+        return self._classify_main(prefix, d, codes, title, low, rest)
+
+    @staticmethod
+    def _classify_prop(prefix, title, low, rest):
+        series = None
+        for words, ser in PROP_SERIES[prefix]:
+            if re.search(words, low):
+                series = ser
+                break
+        if not series:
+            return None
+        if re.search(r"\bvs\.?\b", title.split(":")[0], flags=re.I):
+            return None  # "Team vs. Team: ..." is a game market, not a player prop
+        mo = re.search(r"^(.+?):\s*.*?(?:o/u|over/under)\s*([\d.]+)", title, flags=re.I)
+        if mo:
+            return {"kind": "prop", "series": series, "player": mo.group(1).strip(), "floor": float(mo.group(2)),
+                    "ou": True}
+        my = re.search(r"will (.+?) (?:score|record|have|get|throw|rush|catch)\s+(\d+)\+", title, flags=re.I)
+        if my:
+            return {"kind": "prop", "series": series, "player": my.group(1).strip(),
+                    "floor": float(my.group(2)) - 0.5, "ou": False}
+        if series == "KXNFLTD":
+            ma = re.search(r"^(.+?):\s*anytime", title, flags=re.I) or re.search(r"will (.+?) score a touchdown", title, flags=re.I)
+            if ma:
+                return {"kind": "prop", "series": series, "player": ma.group(1).strip(), "floor": 0.5, "ou": False}
+        return None
+
+    def _classify_main(self, prefix, d, codes, title, low, rest):
         mt = re.search(r"o/u\s*([\d.]+)", low)
         if ("total" in rest or mt) and mt:
             if prefix not in TOTAL_SERIES:
@@ -190,7 +267,15 @@ class SportsMatcher:
         outcome = (t.get("outcome") or "").strip()
         teams = split_teams(t.get("title") or "")
 
-        if c["kind"] == "map":
+        if c["kind"] == "prop":
+            return self._prop_lookup(c, outcome)
+        per = c.get("period")
+        if per:
+            lg = PERIOD_LEAGUES[c["prefix"]]
+            series = [f"KX{lg}{per}" + {"total": "TOTAL", "spread": "SPREAD"}.get(c["kind"], "")]
+            if c["kind"] not in ("winner", "total", "spread"):
+                return None, "period bet type not copied"
+        elif c["kind"] == "map":
             series = [MAP_SERIES[c["prefix"]]]
         elif c["kind"] == "total":
             series = [TOTAL_SERIES[c["prefix"]]]
@@ -278,6 +363,30 @@ class SportsMatcher:
         if c["kind"] != "team_yesno" and not opponent_ok(best):
             return None, "found team but opponent didn't match"
         return {"ticker": best["ticker"], "side": side, "score": round(best_s, 2), "how": "name"}, None
+
+    def _prop_lookup(self, c, outcome):
+        """Player prop: same player, same game date, same line ("26+" on Kalshi = O/U 25.5)."""
+        try:
+            cands = self._series_markets(c["series"])
+        except Exception as e:
+            return None, f"Kalshi lookup failed: {e}"
+        best, best_s = None, 0.0
+        for m in cands:
+            kd = parse_kalshi_date(m.get("event_ticker", ""))
+            if not kd or abs((kd - c["date"]).days) > 1:
+                continue
+            k = self._strike(m)
+            if k is None or abs(k - c["floor"]) > 1e-6:
+                continue
+            who = (m.get("title") or "").split(":")[0]
+            sc = name_sim(c["player"], who)
+            if sc > best_s:
+                best, best_s = m, sc
+        if not best or best_s < 0.85:
+            return None, f"no Kalshi {c['series']} {c['floor'] + 0.5:g}+ for {c['player']}"
+        o = (outcome or "").strip().lower()
+        side = "no" if o in ("under", "no") else "yes"
+        return {"ticker": best["ticker"], "side": side, "how": "prop"}, None
 
     # ------------------------------------------------------------------ #
     @staticmethod
