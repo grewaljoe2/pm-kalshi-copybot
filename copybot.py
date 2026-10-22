@@ -586,43 +586,33 @@ class Kalshi:
             return {"fill_count": n, "status": "unknown"}
 
     def cancel_order(self, order_id: str, ticker: str | None = None) -> None:
-        """Cancel a resting order. Tries the V2 forms; logs each failure so the right one is known."""
-        tries = [("DELETE", "/portfolio/events/orders/batched",
-                  {"json": {"orders": [{"order_id": order_id, **({"ticker": ticker} if ticker else {})}]}}),
-                 ("DELETE", f"/portfolio/events/orders/{order_id}", {"params": {"ticker": ticker}} if ticker else {}),
-                 ("DELETE", f"/portfolio/events/orders/{order_id}", {}),
-                 ("POST", f"/portfolio/events/orders/{order_id}/cancel", {"json": {"ticker": ticker} if ticker else {}}),
-                 ("DELETE", "/portfolio/events/orders/batched", {"json": {"ids": [order_id]}}),
-                 ("DELETE", "/portfolio/events/orders/batched", {"json": {"order_ids": [order_id]}}),
-                 ("DELETE", "/portfolio/orders/batched", {"json": {"ids": [order_id]}}),
-                 ("DELETE", f"/portfolio/orders/{order_id}", {})]
-        tries = [t for t in tries if t[1] != f"/portfolio/orders/{order_id}"]  # v1 endpoint: gone (410)
-        good = getattr(self, "_cancel_way", None)
-        if good is not None:  # the form that worked last time goes first
-            tries = [tries[good]] + [t for i, t in enumerate(tries) if i != good]
-            idx = [good] + [i for i in range(len(tries)) if i != good]
-        else:
-            idx = list(range(len(tries)))
+        """Cancel a resting order (V2). Kalshi needs market_ticker to find the order's exchange shard, and the
+        batch form reports failures inside a 200 response, so every result is checked."""
+        q = {"market_ticker": ticker} if ticker else {}
         errs = []
-        for i, (method, path, kw) in zip(idx, tries):
-            try:
-                self._req(method, path, **kw)
-            except Exception as e:
-                errs.append(f"{method} {path}: {str(e)[:120]}")
-                if "not found" in str(e).lower() or "404" in str(e):
-                    return
-                continue
-            try:  # a 200 doesn't prove it: check the order is really gone
-                st = self._req("GET", f"/portfolio/orders/{order_id}").get("order", {}).get("status")
-            except Exception:
-                st = None
-            if st != "resting":
-                if self.__dict__.get("_cancel_way") != i:
-                    log.info("  cancel works via %s %s (status now %s)", method, path, st)
-                self._cancel_way = i
+        try:
+            r = self._req("DELETE", f"/portfolio/events/orders/{order_id}", params=q)
+            if r.get("order_id") or r == {}:
                 return
-            errs.append(f"{method} {path}: returned OK but order still resting")
-        raise RuntimeError(" | ".join(errs))
+        except Exception as e:
+            msg = str(e)
+            if "404" in msg or "not found" in msg.lower():
+                return  # already gone (filled, expired or cancelled)
+            errs.append(f"single: {msg[:140]}")
+        try:
+            r = self._req("DELETE", "/portfolio/events/orders/batched",
+                          json={"orders": [{"order_id": order_id, **({"market_ticker": ticker} if ticker else {})}]})
+            for o in r.get("orders") or []:
+                if o.get("error"):
+                    em = str(o["error"])
+                    if "not_found" in em.lower() or "not found" in em.lower():
+                        return
+                    errs.append(f"batch: {em[:140]}")
+                else:
+                    return
+        except Exception as e:
+            errs.append(f"batch: {str(e)[:140]}")
+        raise RuntimeError(" | ".join(errs) or "cancel not confirmed")
 
     def collections(self) -> list[dict]:
         out, cursor = [], None
