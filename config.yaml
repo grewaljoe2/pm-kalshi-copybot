@@ -97,8 +97,8 @@ lag_watch:
   crypto_min_games: 8       #   across 8 different 15-min/hourly windows
   poll_seconds: 5
   min_gap: 0.03             # Kalshi at least 3c cheaper than Polymarket after the fee
-  max_live: 60              # live markets polled every poll_seconds
-  max_pre: 60               # upcoming markets polled every pre_poll_seconds
+  max_live: 200             # live markets polled every poll_seconds
+  max_pre: 200              # upcoming markets polled every pre_poll_seconds
   pre_poll_seconds: 30
   discover_every_s: 600     # re-scan Polymarket's sports list every 10 min
   stake_pct: 0.03           # trade mode: 3% of balance per gap

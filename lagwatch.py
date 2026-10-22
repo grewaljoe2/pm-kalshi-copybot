@@ -480,4 +480,9 @@ class LagWatch:
                     self.tick()
             except Exception as e:
                 log.warning("lagwatch tick failed: %s", e)
-            stop.wait(max(0.5, every - (time.time() - t0)))
+            took = time.time() - t0
+            if took > 2 * every and time.time() - getattr(self, "_slow_log", 0) > 600:
+                self._slow_log = time.time()
+                log.warning("LAGWATCH slow round: %.1fs for %d live + %d upcoming markets", took,
+                            self.stats.get("pairs_watched", 0), self.stats.get("pre_watched", 0))
+            stop.wait(max(0.5, every - took))
