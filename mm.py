@@ -214,12 +214,12 @@ class MarketMaker:
         if now - getattr(self, "_truth_t", 0) < 300:
             return getattr(self, "_truth_off", False)
         self._truth_t = now
-        v = self.bot.kalshi_truth(tuple(self.coins()))
+        v = self.bot.truth_since_start("mm", tuple(self.coins()))
         if v is None:
             return getattr(self, "_truth_off", False)
         off = v < -float(self.cfg.get("kill_usd", 5))
         if off and not getattr(self, "_truth_off", False):
-            log.warning("MM OFF for today: Kalshi says market making is %+.2f after fees (limit -$%.0f)", v,
+            log.warning("MM OFF for today: Kalshi says market making is %+.2f after fees since start (limit -$%.0f)", v,
                         float(self.cfg.get("kill_usd", 5)))
         self._truth_off = off
         self._truth_v = v

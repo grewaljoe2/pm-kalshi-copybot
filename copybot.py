@@ -1296,6 +1296,21 @@ class CopyBot:
                 tot += float(r.get("realized_pnl_dollars") or 0) - float(r.get("fees_paid_dollars") or 0)
         return tot
 
+    def truth_since_start(self, key: str, coins: tuple[str, ...]) -> float | None:
+        """Kalshi realized P&L after fees for these coins since the strategy's baseline today (the first
+        check of the day, or a manual reset). Saved, so restarts don't reset it."""
+        v = self.kalshi_truth(coins)
+        if v is None:
+            return None
+        from copybot import _today
+        base = self.state.data.setdefault("truth_base", {})
+        day = _today()
+        b = base.get(key)
+        if not b or b.get("day") != day:
+            b = base[key] = {"day": day, "v": v}
+            log.info("Kalshi baseline for %s today: %+.2f (limits count from here)", key, v)
+        return v - b["v"]
+
     def crypto_pot_usd(self) -> float:
         """Money deposited only for lag trades + the market maker: whales, combos and board picks never use it."""
         return max(0.0, float(self.bank.get("crypto_pot_usd", 0) or 0))
