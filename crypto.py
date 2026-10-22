@@ -1,0 +1,219 @@
+"""
+Crypto lag watcher: Kalshi's short-term BTC / ETH markets vs the live coin price.
+
+Price: Coinbase websocket (BTC-USD, ETH-USD), every trade. Volatility: per-second log
+returns, exponentially weighted (recent minutes count most).
+
+Markets (found every 60s, closing within the next 70 minutes):
+  15-minute up/down  (KXBTC15M, KXETH15M): YES if the price at close >= the price at open
+  hourly above/below (KXBTCD, KXETHD):    YES if the price at close is above the level
+
+Fair chance of YES = N( ln(S/K) / sqrt(sigma^2 * t + basis^2) ), where S = live price,
+K = start price or level, t = seconds left, basis = allowance for Kalshi settling on the
+CF Benchmarks index (several exchanges averaged) rather than Coinbase alone.
+
+A gap = fair value minus Kalshi's live ask minus the fee >= min_gap, on YES or NO, confirmed
+on Kalshi's order book. Gaps feed the same evidence / auto-switch / trading logic as sports
+(groups "BTC 15m", "BTC hourly", "ETH 15m", ...). No trades in the last 45s of a window.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import math
+import re
+import threading
+import time
+from collections import deque
+from datetime import datetime
+
+log = logging.getLogger("crypto")
+COINBASE_WS = "wss://ws-feed.exchange.coinbase.com"
+
+
+def ncdf(x: float) -> float:
+    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+
+class CoinStream:
+    """Live Coinbase prices + per-second volatility."""
+
+    def __init__(self, products=("BTC-USD", "ETH-USD")):
+        self.products = list(products)
+        self.price: dict[str, float] = {}
+        self.ts: dict[str, float] = {}
+        self.var: dict[str, float] = {}        # EWMA of squared 1s log returns
+        self.sec: dict[str, tuple] = {}        # last (second, price)
+        self.hist: dict[str, deque] = {p: deque(maxlen=7200) for p in self.products}  # (sec, price)
+
+    def start(self) -> "CoinStream":
+        threading.Thread(target=self._run, name="coinbase-ws", daemon=True).start()
+        return self
+
+    def price_at(self, product: str, t: float) -> float | None:
+        """Our recorded price at epoch second t (for 15-minute windows' start price)."""
+        best = None
+        for s, p in reversed(self.hist[product]):
+            if s <= t:
+                best = p if t - s <= 5 else None
+                break
+        return best
+
+    def vol(self, product: str) -> float | None:
+        """Per-second volatility (std of 1s log returns)."""
+        v = self.var.get(product)
+        return math.sqrt(v) if v else None
+
+    def _tick(self, product: str, px: float) -> None:
+        now = time.time()
+        self.price[product], self.ts[product] = px, now
+        s = int(now)
+        last = self.sec.get(product)
+        if last is None or s > last[0]:
+            if last is not None:
+                gap = max(1, s - last[0])
+                r2 = (math.log(px / last[1])) ** 2 / gap
+                lam = 0.995  # ~3 min half-life at 1 update/s
+                self.var[product] = lam * self.var.get(product, r2) + (1 - lam) * r2
+            self.sec[product] = (s, px)
+            self.hist[product].append((s, px))
+
+    def _run(self):
+        import websocket
+        while True:
+            try:
+                ws = websocket.create_connection(COINBASE_WS, timeout=30)
+                ws.send(json.dumps({"type": "subscribe", "product_ids": self.products, "channels": ["ticker"]}))
+                log.info("Coinbase live stream connected: %s", self.products)
+                while True:
+                    j = json.loads(ws.recv())
+                    if j.get("type") == "ticker" and j.get("price"):
+                        self._tick(j["product_id"], float(j["price"]))
+            except Exception as e:
+                log.warning("coinbase ws: %s", e)
+                time.sleep(3)
+
+
+SERIES = {  # Kalshi series -> (coin product, kind)
+    "KXBTC15M": ("BTC-USD", "15m"), "KXETH15M": ("ETH-USD", "15m"),
+    "KXBTCD": ("BTC-USD", "hourly"), "KXETHD": ("ETH-USD", "hourly"),
+}
+
+
+class CryptoLag:
+    def __init__(self, bot, lagwatch, stream, cfg: dict):
+        self.bot, self.lw, self.ks, self.cfg = bot, lagwatch, stream, cfg or {}
+        self.coins = CoinStream().start()
+        self.markets: dict[str, dict] = {}
+        self._last_disc = 0.0
+        self._logged_series: set[str] = set()
+
+    # ---- discovery ------------------------------------------------------------- #
+    def discover(self) -> None:
+        now = time.time()
+        keep = {}
+        for series, (prod, kind) in SERIES.items():
+            try:
+                j = self.bot.kdata._req("GET", "/markets", params={"series_ticker": series, "status": "open", "limit": 200})
+            except Exception as e:
+                log.debug("crypto discover %s: %s", series, e)
+                continue
+            ms = j.get("markets") or []
+            if ms and series not in self._logged_series:
+                self._logged_series.add(series)
+                m = ms[0]
+                log.info("CRYPTO market format %s: %s", series, json.dumps({k: m.get(k) for k in (
+                    "ticker", "title", "subtitle", "yes_sub_title", "floor_strike", "cap_strike", "strike_type",
+                    "open_time", "close_time", "expected_expiration_time", "functional_strike", "custom_strike")}
+                    | {"rules": (m.get("rules_primary") or "")[:240]}))
+            for m in ms:
+                close = self._ts(m.get("close_time"))
+                if not close or not (now < close <= now + 70 * 60):
+                    continue
+                st = (m.get("strike_type") or "").lower()
+                k = m.get("floor_strike") if m.get("floor_strike") is not None else m.get("cap_strike")
+                info = {"ticker": m["ticker"], "series": series, "prod": prod, "kind": kind, "close": close,
+                        "open": self._ts(m.get("open_time")), "strike": float(k) if k is not None else None,
+                        "strike_type": st, "title": m.get("title") or m["ticker"]}
+                if kind == "hourly" and (info["strike"] is None or st not in ("greater", "greater_or_equal", "less",
+                                                                              "less_or_equal")):
+                    continue  # range buckets etc: not handled
+                if kind == "hourly":  # only levels near the price matter (far ones never move)
+                    px = self.coins.price.get(prod)
+                    if px and abs(math.log(px / info["strike"])) > 0.015:
+                        continue
+                keep[m["ticker"]] = info
+        self.markets = keep
+        if self.ks:
+            self.ks.watch(list(keep))
+        log.info("CRYPTO watching %d Kalshi crypto markets (%s)", len(keep),
+                 ", ".join(f"{s}:{sum(1 for x in keep.values() if x['series'] == s)}" for s in SERIES))
+
+    @staticmethod
+    def _ts(v):
+        if not v:
+            return None
+        try:
+            return datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+
+    # ---- pricing ----------------------------------------------------------------- #
+    def fair_yes(self, m: dict) -> float | None:
+        S = self.coins.price.get(m["prod"])
+        if not S or time.time() - self.coins.ts.get(m["prod"], 0) > 10:
+            return None
+        sig = self.coins.vol(m["prod"])
+        if not sig:
+            return None
+        t = max(1.0, m["close"] - time.time())
+        if m["kind"] == "15m":
+            K = m["strike"] or (self.coins.price_at(m["prod"], m["open"]) if m.get("open") else None)
+            if not K:
+                return None
+            above = True
+        else:
+            K = m["strike"]
+            above = m["strike_type"].startswith("greater")
+        basis = float(self.cfg.get("basis", 0.0003))
+        sd = math.sqrt(sig * sig * t + basis * basis)
+        p = ncdf(math.log(S / K) / sd)
+        return p if above else 1 - p
+
+    # ---- loop ------------------------------------------------------------------- #
+    def tick(self) -> None:
+        now = time.time()
+        if now - self._last_disc > 60:
+            self._last_disc = now
+            self.discover()
+        rate = getattr(self.bot, "fee_rate", 0.07)
+        margin = float(self.cfg.get("min_gap", 0.04))
+        for tk, m in list(self.markets.items()):
+            if m["close"] - now < 45:
+                continue
+            q = self.ks.quote(tk) if self.ks else None
+            if not q or q.get("yes_ask") is None or q.get("yes_bid") is None:
+                continue
+            fy = self.fair_yes(m)
+            if fy is None:
+                continue
+            kind = "15m" if m["kind"] == "15m" else "hourly"
+            grp = f'{m["prod"].split("-")[0]} {kind}'
+            # YES side and NO side
+            for side, fair, ask, bid in (("yes", fy, q["yes_ask"], q["yes_bid"]),
+                                         ("no", 1 - fy, 1 - q["yes_bid"], 1 - q["yes_ask"])):
+                if not (0.05 <= ask <= 0.95):
+                    continue
+                p = {"ticker": tk, "side": side, "title": m["title"], "start": m.get("open")}
+                self.lw.check_external(p, grp, fair, ask, bid, now, rate, margin, window=min(60, m["close"] - now))
+
+    def run(self, stop) -> None:
+        every = float(self.cfg.get("poll_seconds", 1))
+        time.sleep(20)
+        while not stop.is_set():
+            try:
+                if not self.bot.paused:
+                    self.tick()
+            except Exception as e:
+                log.warning("crypto tick failed: %s", e)
+            stop.wait(every)

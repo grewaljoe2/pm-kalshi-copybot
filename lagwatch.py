@@ -62,6 +62,9 @@ class LagWatch:
         self.follow: list[dict] = []
         self._last_disc = 0.0
         self._last_pre = 0.0
+        import threading
+        self.lock = threading.RLock()
+        self.ks = None  # live Kalshi stream (set by the app)
         st = bot.state.data.setdefault("lagwatch", {})
         for k, v in (("gaps", 0), ("converged", 0), ("examples", []), ("pairs_watched", 0),
                      ("trades", []), ("games", []), ("groups", {})):
@@ -273,25 +276,39 @@ class LagWatch:
         if not batch:
             return
         books = self.pm_books(sorted({p["token"] for p, _ in batch}))
-        kms = self.k_markets(sorted({p["ticker"] for p, _ in batch}))
+        tickers = sorted({p["ticker"] for p, _ in batch})
+        if self.ks:
+            self.ks.watch(tickers)
+            missing = [t for t in tickers if not self.ks.quote(t)]
+        else:
+            missing = tickers
+        kms = self.k_markets(missing) if missing else {}
         for p, is_live in batch:
             b, m = books.get(p["token"]), kms.get(p["ticker"])
-            if b and m:
+            if b and (m or (self.ks and self.ks.quote(p["ticker"]))):
                 self._check(p, is_live, b, m, now)
         self.stats["trades"] = [x for x in self.stats["trades"] if now - x["t0"] < 18 * 3600]
 
-    def _check(self, p: dict, is_live: bool, book: tuple, m: dict, now: float) -> None:
+    def _k_quote(self, p: dict, m: dict | None) -> tuple:
+        """Kalshi ask/bid for this side: live stream first, market listing as fallback."""
+        q = self.ks.quote(p["ticker"]) if getattr(self, "ks", None) else None
+        if q and q.get("yes_ask") is not None and q.get("yes_bid") is not None:
+            ya, yb = q["yes_ask"], q["yes_bid"]
+            return (ya, yb) if p["side"] == "yes" else (1 - yb, 1 - ya)
+        if m:
+            return _px(m, f'{p["side"]}_ask'), _px(m, f'{p["side"]}_bid')
+        return None, None
+
+    def _check(self, p: dict, is_live: bool, book: tuple, m: dict | None, now: float) -> None:
         rate = getattr(self.bot, "fee_rate", 0.07)
         margin = float(self.cfg.get("min_gap", 0.03))
         bid, ask = book
         if bid is None or ask is None or ask - bid > 0.04:
             return
         pm_mid = (bid + ask) / 2
-        k_ask, k_bid = _px(m, f'{p["side"]}_ask'), _px(m, f'{p["side"]}_bid')
+        k_ask, k_bid = self._k_quote(p, m)
         if not k_ask or k_ask <= 0.05 or k_ask > float(self.cfg.get("max_price", 0.92)):
             return  # near-certain or near-dead: no room, and end-of-game prices jump
-        key = f'{p["ticker"]}|{p["side"]}'
-        grp = self.group_of(p, is_live)
         gap = pm_mid - k_ask - self._fee(k_ask, rate)
         k_mid = (k_ask + k_bid) / 2 if k_bid else k_ask
         if gap > float(self.cfg.get("max_gap", 0.15)) or abs(pm_mid - k_mid) > 0.20:
@@ -300,45 +317,53 @@ class LagWatch:
             if p["bad"] == 1:
                 log.info("LAGWATCH ignoring %s %s: Kalshi %.2f vs Polymarket %.3f looks like a different bet",
                          p["ticker"], p["side"].upper(), k_ask, pm_mid)
-            self.open.pop(key, None)
+            self.open.pop(f'{p["ticker"]}|{p["side"]}', None)
             return
-        g = self.open.get(key)
-        if gap >= margin and not g:
-            # confirm on the live order book before counting or trading it
-            try:
-                ra, rq = self.real_ask(p["ticker"], p["side"])
-            except Exception:
-                ra, rq = None, 0
-            real_gap = (pm_mid - ra - self._fee(ra, rate)) if ra else -1
-            if real_gap < margin or rq < 1:
-                self.stats["phantom"] = self.stats.get("phantom", 0) + 1
-                self._g(grp)["phantom"] = self._g(grp).get("phantom", 0) + 1
-                return  # listing showed a gap the order book doesn't have
-            k_ask, gap = ra, real_gap
-        if gap >= margin:
-            if not g:
-                self.open[key] = {"key": key, "title": p["title"], "ticker": p["ticker"], "side": p["side"],
-                                  "t0": now, "entry": k_ask, "pm_mid": round(pm_mid, 3), "max_gap": gap,
-                                  "group": grp, "live": is_live}
-                log.info("LAGWATCH [%s] gap %s %s: Kalshi %.2f vs Polymarket %.3f (%.1fc)",
-                         grp, p["ticker"], p["side"].upper(), k_ask, pm_mid, 100 * gap)
-                if self.trading(grp):
-                    self._buy(p, k_ask, pm_mid, grp)
-            else:
-                g["max_gap"] = max(g["max_gap"], gap)
-        elif g:
-            g["secs"] = round(now - g["t0"])
-            self.follow.append(g)
-            del self.open[key]
-        window = 60 if is_live else 600
-        for f in [f for f in self.follow if f["key"] == key]:
-            if k_bid and self._net(f["entry"], k_bid, rate) >= 0.01:
-                f["converged"] = True
-            if now - f["t0"] > window or f.get("converged"):
-                self._record(f)
-                self.follow.remove(f)
-        if k_bid:
-            self._maybe_sell(key, k_bid, rate)
+        self.check_external(p, self.group_of(p, is_live), pm_mid, k_ask, k_bid, now, rate, margin,
+                            window=60 if is_live else 600)
+
+    def check_external(self, p: dict, grp: str, fair: float, k_ask: float, k_bid: float | None, now: float,
+                       rate: float, margin: float, window: float = 60) -> None:
+        """Shared gap logic (sports and crypto): fair = what the bet is worth (Polymarket mid, or the
+        crypto model). Confirms on the order book, records evidence, trades if the group is on."""
+        with self.lock:
+            key = f'{p["ticker"]}|{p["side"]}'
+            gap = fair - k_ask - self._fee(k_ask, rate)
+            g = self.open.get(key)
+            if gap >= margin and not g:
+                try:
+                    ra, rq = self.real_ask(p["ticker"], p["side"])
+                except Exception:
+                    ra, rq = None, 0
+                real_gap = (fair - ra - self._fee(ra, rate)) if ra else -1
+                if real_gap < margin or rq < 1:
+                    self.stats["phantom"] = self.stats.get("phantom", 0) + 1
+                    self._g(grp)["phantom"] = self._g(grp).get("phantom", 0) + 1
+                    return  # quote showed a gap the order book doesn't have
+                k_ask, gap = ra, real_gap
+            if gap >= margin:
+                if not g:
+                    self.open[key] = {"key": key, "title": p["title"], "ticker": p["ticker"], "side": p["side"],
+                                      "t0": now, "entry": k_ask, "pm_mid": round(fair, 3), "max_gap": gap,
+                                      "group": grp}
+                    log.info("LAGWATCH [%s] gap %s %s: Kalshi %.2f vs fair %.3f (%.1fc)",
+                             grp, p["ticker"], p["side"].upper(), k_ask, fair, 100 * gap)
+                    if self.trading(grp):
+                        self._buy(p, k_ask, fair, grp)
+                else:
+                    g["max_gap"] = max(g["max_gap"], gap)
+            elif g:
+                g["secs"] = round(now - g["t0"])
+                self.follow.append(g)
+                del self.open[key]
+            for f in [f for f in self.follow if f["key"] == key]:
+                if k_bid and self._net(f["entry"], k_bid, rate) >= 0.01:
+                    f["converged"] = True
+                if now - f["t0"] > window or f.get("converged"):
+                    self._record(f)
+                    self.follow.remove(f)
+            if k_bid:
+                self._maybe_sell(key, k_bid, rate)
 
     @staticmethod
     def _fee(p: float, rate: float) -> float:

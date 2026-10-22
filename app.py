@@ -99,13 +99,22 @@ _register("props", _props_loop)
 
 def _lag_loop():
     from lagwatch import LagWatch
+    from kalshi_ws import KalshiStream
     time.sleep(90)
     while BOT is None:
         time.sleep(10)
     cfg = BOT.cfg.get("lag_watch", {}) or {}
     if not cfg.get("enabled", True):
         return
-    LagWatch(BOT, cfg).run(STOP)
+    lw = LagWatch(BOT, cfg)
+    if BOT.kalshi.pkey:  # live Kalshi prices (websocket) for both watchers
+        lw.ks = KalshiStream(BOT.kalshi).start()
+    ccfg = BOT.cfg.get("crypto_lag", {}) or {}
+    if ccfg.get("enabled", True):
+        from crypto import CryptoLag
+        cl = CryptoLag(BOT, lw, lw.ks, ccfg)
+        threading.Thread(target=cl.run, args=(STOP,), name="crypto-lag", daemon=True).start()
+    lw.run(STOP)
 
 
 _register("lagwatch", _lag_loop)
