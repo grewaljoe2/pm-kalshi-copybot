@@ -150,6 +150,11 @@ crypto_lag:
     kill_usd: 5             # off for the day if Kalshi says market making is down $5 after fees
     breaker_contracts: 6    # Kalshi order group: 6+ contracts filled within 15s -> Kalshi cancels all our quotes in that market
     open_until_left_s: 300  # last 5 min: only quotes that complete a pair (no new one-sided risk)
+    pairs_only: true        # hold both sides, not one: complete a pair at once (taker) if it still costs < $0.99
+    pair_take_min: 0.01     # completing at once must still make 1c+ per pair after the fee
+    max_single_s: 30        # one side only for 30s and no profitable pair -> sell it (if loss <= 3c)
+    max_single_loss: 0.03
+    pair_arb_max: 0.98      # YES + NO both buyable for <= $0.98 after fees -> buy both at once
     pull_c: 0.01            # pull a quote at once if the model value drops 1c under it
     pair_min_c: 0.02        # completing a pair must make at least 2c
     take_profit_pct: 0.5    # one-sided holding up 50%+ on cost: sell it

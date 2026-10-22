@@ -288,6 +288,8 @@ class MarketMaker:
         self._markouts(st, fair, now)
         self._sync_inv(tk, st)
         self._take_profit(tk, st, fair, q, m["close"] - now)
+        if self._pair_up(tk, st, fair, q, m["close"] - now, now):
+            return  # traded this tick; quote again next tick with fresh numbers
         hs, size = float(c.get("half_spread", 0.03)), int(c.get("size", 5))
         inv_y, inv_n = st["inv"]["yes"][0], st["inv"]["no"][0]
         net = inv_y - inv_n
@@ -370,6 +372,69 @@ class MarketMaker:
             log.info("MM_MARKOUT avg per contract: after 10s %+.1fc (%d), after 60s %+.1fc (%d)",
                      100 * agg["10"][0] / max(1, agg["10"][1]), agg["10"][1],
                      100 * agg["60"][0] / max(1, agg["60"][1]), agg["60"][1])
+
+    def _pair_up(self, tk, st, fair, q, left, now) -> bool:
+        """Hold both sides, not one: when only one side has filled, buy the other side right away if the pair
+        still costs under $1 after the fee; if that isn't possible within max_single_s, sell the single side
+        (small loss cap). Also take any pair the book offers for under pair_arb_max. True = traded."""
+        from copybot import Target
+        if not self.cfg.get("pairs_only", True) or self.bot.ledger_queue:
+            return False
+        rate = getattr(self.bot, "fee_rate", 0.07)
+        fee = lambda p: rate * p * (1 - p)
+        ask = {"yes": q["yes_ask"], "no": 1 - q["yes_bid"]}
+        bid = {"yes": q["yes_bid"], "no": 1 - q["yes_ask"]}
+        y, n = st["inv"]["yes"][0], st["inv"]["no"][0]
+        net = y - n
+        if net == 0:
+            st.pop("single_t", None)
+            k = int(self.cfg.get("size", 3))
+            cost = ask["yes"] + ask["no"] + fee(ask["yes"]) + fee(ask["no"])
+            if left > 120 and 0.02 <= ask["yes"] <= 0.98 and cost <= float(self.cfg.get("pair_arb_max", 0.98)) \
+                    and self.bot.cash() > k * cost + 1:
+                f1, p1 = self.bot._execute(Target(tk, "yes"), "buy", k, ask["yes"])
+                if f1:
+                    self._on_fill(tk, st, "yes", f1, p1 / f1, commit=False)
+                    f2, p2 = self.bot._execute(Target(tk, "no"), "buy", f1, ask["no"])
+                    if f2:
+                        self._on_fill(tk, st, "no", f2, p2 / f2, commit=False)
+                    log.info("MM free pair %s: YES %.2f + NO %.2f + fees = %.3f (x%d/%d)", tk, ask["yes"], ask["no"], cost, f1, f2)
+                    return True
+            return False
+        held, other = ("yes", "no") if net > 0 else ("no", "yes")
+        k = abs(net)
+        avg = st["inv"][held][1] / st["inv"][held][0]
+        oa = ask[other]
+        if 0.01 <= oa <= 0.99 and avg + oa + fee(oa) <= 1 - float(self.cfg.get("pair_take_min", 0.01)) \
+                and self.bot.cash() > k * (oa + fee(oa)) + 0.5:
+            if st["orders"].get(other):
+                self._cancel(tk, st, other, "completing pair now")
+            f, pr = self.bot._execute(Target(tk, other), "buy", k, oa)
+            if f:
+                self._on_fill(tk, st, other, f, pr / f, commit=False)
+                log.info("MM pair completed at once %s: %s %.2f + %s %.2f + fee -> %+.1fc each", tk, held.upper(), avg,
+                         other.upper(), oa, 100 * (1 - avg - oa - fee(oa)))
+                st.pop("single_t", None)
+                return True
+        t0 = st.setdefault("single_t", now)
+        b = bid[held]
+        if now - t0 > float(self.cfg.get("max_single_s", 30)) and b is not None and b >= 0.02 and \
+                b >= avg - float(self.cfg.get("max_single_loss", 0.03)) and time.time() >= st.get("sell_wait", 0):
+            f, pr = self.bot._execute(Target(tk, held), "sell", k, b)
+            if f:
+                px = pr / f
+                self.bot.ledger_queue.append(("close", f'MM · {st["coin"]} 15m', tk, held, f, px, f'{st["coin"]} 15m market making'))
+                inv = st["inv"][held]
+                inv[1] -= f * avg
+                inv[0] -= f
+                if st["orders"].get(other):
+                    self._cancel(tk, st, other, "single side closed")
+                log.info("MM single side closed %s %s x%d @ %.2f (cost %.2f): no pair within %ds", tk, held.upper(), f, px,
+                         avg, int(now - t0))
+                st.pop("single_t", None)
+                return True
+            st["sell_wait"] = time.time() + 10
+        return False
 
     def _sync_inv(self, tk, st) -> None:
         """Holdings always match the records (which match Kalshi after reconcile + netting),
@@ -530,11 +595,12 @@ class MarketMaker:
         if o["remaining"] <= 0 or status in ("canceled", "cancelled", "executed", "expired"):
             st["orders"].pop(side, None)
 
-    def _on_fill(self, tk, st, side, n, px) -> None:
+    def _on_fill(self, tk, st, side, n, px, commit: bool = True) -> None:
         self._last_fill_t = time.time()
         st.setdefault("marks", []).append({"t": time.time(), "side": side, "px": px, "n": n})
         name = f'MM · {st["coin"]} 15m'
-        self.bot._commit(n * px)
+        if commit:
+            self.bot._commit(n * px)
         self.bot.ledger_queue.append(("open", name, tk, side, n, px, f'{st["coin"]} 15m market making'))
         inv = st["inv"][side]
         inv[0] += n
