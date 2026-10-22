@@ -74,6 +74,9 @@ class LagWatch:
                 st["groups"]["NBA"] = {"gaps": st["gaps"], "converged": st["converged"],
                                        "games": list(set(st.get("games", []))), "mode": "trade",
                                        "switched_at": st.get("switched_at")}
+        if not st.get("verified_v1"):  # earlier gaps weren't checked against the order book: re-prove
+            st["verified_v1"] = True
+            st.update(gaps=0, converged=0, examples=[], groups={}, mode="watch", phantom=0)
         self.stats = st
         for name in list(st["groups"]):  # settings may have changed: re-check every league now
             self._maybe_switch(name)
@@ -201,6 +204,26 @@ class LagWatch:
                 log.debug("kalshi batch failed: %s", e)
         return out
 
+    def real_ask(self, ticker: str, side: str) -> tuple[float | None, int]:
+        """Best ask and size for `side` from Kalshi's live order book (the market listing can lag).
+        Kalshi's book lists bids only: YES ask = 1 - best NO bid, and the reverse."""
+        j = self.bot.kdata._req("GET", f"/markets/{ticker}/orderbook", params={"depth": 5})
+        ob = j.get("orderbook") or j.get("orderbook_fp") or {}
+        other = "no" if side == "yes" else "yes"
+        levels = ob.get(f"{other}_dollars") or ob.get(other) or []
+        best, qty = None, 0
+        for lv in levels:
+            try:
+                px, q = float(lv[0]), float(lv[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            px = px / 100 if px > 1 else px
+            if best is None or px > best:
+                best, qty = px, q
+        if best is None:
+            return None, 0
+        return round(1 - best, 4), int(qty)
+
     # ---- groups ---------------------------------------------------------------- #
     @staticmethod
     def group_of(p: dict, live: bool) -> str:
@@ -280,6 +303,18 @@ class LagWatch:
             self.open.pop(key, None)
             return
         g = self.open.get(key)
+        if gap >= margin and not g:
+            # confirm on the live order book before counting or trading it
+            try:
+                ra, rq = self.real_ask(p["ticker"], p["side"])
+            except Exception:
+                ra, rq = None, 0
+            real_gap = (pm_mid - ra - self._fee(ra, rate)) if ra else -1
+            if real_gap < margin or rq < 1:
+                self.stats["phantom"] = self.stats.get("phantom", 0) + 1
+                self._g(grp)["phantom"] = self._g(grp).get("phantom", 0) + 1
+                return  # listing showed a gap the order book doesn't have
+            k_ask, gap = ra, real_gap
         if gap >= margin:
             if not g:
                 self.open[key] = {"key": key, "title": p["title"], "ticker": p["ticker"], "side": p["side"],
@@ -329,12 +364,18 @@ class LagWatch:
         if bot.mode == "live":
             # take whatever is available at the gap price (thin books: all-or-nothing orders fail)
             try:
-                o = bot.kalshi.create_order(p["ticker"], p["side"], "buy", n, ask, "immediate_or_cancel")
+                o = bot.kalshi.create_order(p["ticker"], p["side"], "buy", n, round(ask + 0.01, 2), "immediate_or_cancel")
                 filled = int(float(o.get("fill_count") or 0))
             except Exception as e:
                 log.info("LAGTRADE buy failed %s: %s", p["ticker"], str(e)[:120])
                 return
-            cost = filled * ask
+            cost = filled * (float(o.get("average_fill_price") or 0) or ask)
+            g = self._g(grp)
+            g["attempts"] = g.get("attempts", 0) + 1
+            g["fills"] = g.get("fills", 0) + (1 if filled else 0)
+            if g["attempts"] >= 8 and g["fills"] / g["attempts"] < 0.25:  # gaps not really buyable: stop
+                g.update(mode="watch", gaps=0, converged=0, games=[], attempts=0, fills=0)
+                log.warning("LAGWATCH [%s] back to WATCH: buys rarely fill at the gap price", grp)
         else:
             filled, cost = bot._execute(Target(p["ticker"], p["side"]), "buy", n, ask)
         if not filled:
