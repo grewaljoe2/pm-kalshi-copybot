@@ -137,12 +137,7 @@ class MarketMaker:
         """After a restart: cancel any of our old resting quotes on market-maker markets."""
         self._cleaned = True
         for st in self.mk.values():
-            for side in list(st.get("orders", {})):  # catch fills on quotes from before the restart, then drop them
-                try:
-                    self._poll_one(st.get("ticker", ""), st, side)
-                except Exception:
-                    pass
-            st["orders"] = {}
+            st["orders"] = {}  # quotes from before the restart: cancelled below; their fills come in via the position check
         try:
             j = self.bot.kalshi._req("GET", "/portfolio/orders", params={"status": "resting", "limit": 200})
             for o in j.get("orders") or []:
@@ -191,7 +186,7 @@ class MarketMaker:
         if now - getattr(self, "_last_sweep", 0) < 20:
             return
         self._last_sweep = now
-        if now - getattr(self, "_last_pos", 0) >= 60:
+        if now - getattr(self, "_last_pos", 0) >= 20:
             self._last_pos = now
             self.check_positions()
         try:
@@ -228,8 +223,8 @@ class MarketMaker:
     def check_positions(self) -> None:
         """Every minute: Kalshi's position on each market-maker market vs our records. A difference seen
         twice in a row (not just a fill still on its way) is booked so the exits can manage it."""
-        if self.bot.ledger_queue:
-            return
+        if self.bot.ledger_queue or time.time() - getattr(self, "_last_fill_t", 0) < 8:
+            return  # fills still on their way into the records
         try:
             j = self.bot.kalshi._req("GET", "/portfolio/positions", params={"limit": 200, "settlement_status": "unsettled"})
         except Exception as e:
@@ -247,8 +242,8 @@ class MarketMaker:
             if d == 0:
                 continue
             now_bad[tk] = d
-            if seen.get(tk) != d:
-                log.info("MM position check %s: Kalshi %+d vs records %+d (checking again in 1 min)", tk, k_net, mine)
+            if not seen.get(tk) or (seen[tk] > 0) != (d > 0):
+                log.info("MM position check %s: Kalshi %+d vs records %+d (re-checking in 20s)", tk, k_net, mine)
                 continue
             held = "yes" if d > 0 else "no"
             expo = float(r.get("market_exposure_dollars") or 0)
@@ -263,8 +258,8 @@ class MarketMaker:
         if now - getattr(self, "_last_status", 0) < 60:
             return
         self._last_status = now
-        quotes = {tk[-14:]: {sd: o["price"] for sd, o in st["orders"].items()} for tk, st in self.mk.items() if st["orders"]}
-        inv = {tk[-14:]: (st["inv"]["yes"][0], st["inv"]["no"][0]) for tk, st in self.mk.items()
+        quotes = {st["coin"] + tk[-5:]: {sd: o["price"] for sd, o in st["orders"].items()} for tk, st in self.mk.items() if st["orders"]}
+        inv = {st["coin"] + tk[-5:]: (st["inv"]["yes"][0], st["inv"]["no"][0]) for tk, st in self.mk.items()
                if st["inv"]["yes"][0] or st["inv"]["no"][0]}
         log.info("MM status: quotes %s | holding (YES, NO) %s | gate %s | today $%.2f (Kalshi says %s)", quotes, inv,
                  getattr(self, "_last_gate", {}), self.daily_pnl(),
@@ -525,6 +520,7 @@ class MarketMaker:
             st["orders"].pop(side, None)
 
     def _on_fill(self, tk, st, side, n, px) -> None:
+        self._last_fill_t = time.time()
         st.setdefault("marks", []).append({"t": time.time(), "side": side, "px": px, "n": n})
         name = f'MM · {st["coin"]} 15m'
         self.bot._commit(n * px)

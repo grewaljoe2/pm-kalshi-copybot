@@ -592,10 +592,17 @@ class Kalshi:
         batch form reports failures inside a 200 response, so every result is checked."""
         q = {"market_ticker": ticker} if ticker else {}
         errs = []
+        def gone() -> bool:
+            try:
+                st = self._req("GET", f"/portfolio/orders/{order_id}").get("order", {}).get("status")
+            except Exception:
+                return True
+            return st != "resting"
         try:
-            r = self._req("DELETE", f"/portfolio/events/orders/{order_id}", params=q)
-            if r.get("order_id") or r == {}:
+            self._req("DELETE", f"/portfolio/events/orders/{order_id}", params=q)
+            if gone():
                 return
+            errs.append("single: returned OK but still resting")
         except Exception as e:
             msg = str(e)
             if "404" in msg or "not found" in msg.lower():
@@ -610,8 +617,10 @@ class Kalshi:
                     if "not_found" in em.lower() or "not found" in em.lower():
                         return
                     errs.append(f"batch: {em[:140]}")
-                else:
+                elif gone():
                     return
+                else:
+                    errs.append("batch: returned OK but still resting")
         except Exception as e:
             errs.append(f"batch: {str(e)[:140]}")
         raise RuntimeError(" | ".join(errs) or "cancel not confirmed")
