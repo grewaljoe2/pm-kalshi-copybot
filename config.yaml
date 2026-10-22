@@ -116,6 +116,7 @@ lag_watch:
   ladder_model_margin: 0.08 # skip the stop if the model still values it 8c+ above the floor (a book dip)
   model_stop: true          # 5+ min left: sell if the model values the trade at half the entry or less (and bid pays 75%+ of that)
   stop_value_share: 0.5
+  mm_keep_usd: 15          # lag trades always leave $15 for the market maker (it may use any free cash beyond that)
 
 
 # Crypto lag: Kalshi BTC/ETH 15-minute up/down and hourly above/below vs the live Coinbase price.
