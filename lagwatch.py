@@ -86,8 +86,13 @@ class LagWatch:
         pairs = self.bot.__dict__.setdefault("pairs", {})
         for offset in range(0, int(self.cfg.get("discover_max_events", 600)), 100):
             try:
-                r = self.s.get(f"{GAMMA}/events", params={"active": "true", "closed": "false", "tag_slug": "sports",
-                                                         "limit": 100, "offset": offset}, timeout=20)
+                from datetime import datetime, timezone, timedelta
+                iso = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")
+                nowdt = datetime.now(timezone.utc)
+                r = self.s.get(f"{GAMMA}/events", params={
+                    "active": "true", "closed": "false", "tag_slug": "sports", "limit": 100, "offset": offset,
+                    "end_date_min": iso(nowdt - timedelta(hours=6)), "end_date_max": iso(nowdt + timedelta(days=2))},
+                    timeout=20)
                 r.raise_for_status()
                 evs = r.json()
             except Exception as e:
@@ -99,6 +104,15 @@ class LagWatch:
                 for m in ev.get("markets") or []:
                     scanned += 1
                     start = self._start(m, ev)
+                    if not start and m.get("conditionId"):
+                        t0 = {"slug": m.get("slug"), "eventSlug": ev.get("slug"), "title": m.get("question") or "",
+                              "outcome": "", "conditionId": m.get("conditionId")}
+                        c = self.bot.sports.classify(t0) or {}
+                        if c.get("date") and "skip" not in c:  # a dated game market: get its start once
+                            try:
+                                start = self.bot.pm.market_info(m["conditionId"]).get("start")
+                            except Exception:
+                                start = None
                     if not start or not (now - 4 * 3600 <= start <= now + 12 * 3600):
                         why["no start" if not start else "not today"] += 1
                         continue
@@ -136,7 +150,8 @@ class LagWatch:
     @staticmethod
     def _start(m: dict, ev: dict) -> float | None:
         from datetime import datetime
-        for v in (m.get("gameStartTime"), ev.get("startTime"), m.get("eventStartTime"), ev.get("startDate")):
+        for v in (m.get("gameStartTime"), m.get("game_start_time"), ev.get("gameStartTime"), ev.get("startTime"),
+                  m.get("eventStartTime")):
             if not v:
                 continue
             txt = str(v).strip().replace(" ", "T").replace("Z", "+00:00")
