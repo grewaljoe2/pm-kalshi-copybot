@@ -47,9 +47,49 @@ class CoinStream:
         self.hist: dict[str, deque] = {p: deque(maxlen=7200) for p in self.products}  # (sec, price)
         self.since: dict[str, float] = {}      # when we started receiving prices
 
+    SAVE = "/var/data/coins.json"
+
     def start(self) -> "CoinStream":
+        self._load()
         threading.Thread(target=self._run, name="coinbase-ws", daemon=True).start()
+        threading.Thread(target=self._saver, name="coin-save", daemon=True).start()
         return self
+
+    def _load(self) -> None:
+        """After a restart, reuse the saved volatility if it's under 5 minutes old (no 10-minute warmup)."""
+        import os
+        try:
+            if not os.path.exists(self.SAVE) or time.time() - os.path.getmtime(self.SAVE) > 300:
+                return
+            with open(self.SAVE) as f:
+                d = json.load(f)
+            for p in self.products:
+                if p in (d.get("var") or {}):
+                    self.var[p] = float(d["var"][p])
+                    self.since[p] = time.time() - self.WARMUP - 1
+                    for s, px in (d.get("hist") or {}).get(p, [])[-900:]:
+                        self.hist[p].append((int(s), float(px)))
+            log.info("CRYPTO model restored from %.0fs ago: %s", time.time() - os.path.getmtime(self.SAVE),
+                     sorted(self.var))
+        except Exception as e:
+            log.warning("crypto model restore failed: %s", e)
+
+    def _saver(self) -> None:
+        import os
+        while True:
+            time.sleep(30)
+            try:
+                if not os.path.isdir(os.path.dirname(self.SAVE)):
+                    continue
+                ready = [p for p in self.products if self.vol(p)]
+                d = {"var": {p: self.var[p] for p in ready},
+                     "hist": {p: list(self.hist[p])[-900:] for p in ready}}
+                tmp = self.SAVE + ".tmp"
+                with open(tmp, "w") as f:
+                    json.dump(d, f)
+                os.replace(tmp, self.SAVE)
+            except Exception as e:
+                log.warning("crypto model save failed: %s", e)
 
     def price_at(self, product: str, t: float) -> float | None:
         """Our recorded price at epoch second t (for 15-minute windows' start price)."""
@@ -157,6 +197,9 @@ class CryptoLag:
         self.markets = keep
         if self.ks:
             self.ks.watch(list(keep))
+            if hasattr(self.ks, "watch_books"):
+                self.ks.prune_books(keep)
+                self.ks.watch_books(list(keep))
         log.info("CRYPTO watching %d Kalshi crypto markets (%s)", len(keep),
                  ", ".join(f"{s}:{sum(1 for x in keep.values() if x['series'] == s)}" for s in SERIES))
 

@@ -113,7 +113,7 @@ lag_watch:
 # Same evidence rules and auto-switch as sports (groups "BTC 15m", "BTC hourly", "ETH 15m", ...).
 crypto_lag:
   enabled: true
-  poll_seconds: 1
+  poll_seconds: 0.25        # check every quarter second (gaps often last only 1-2 seconds)
   min_gap: 0.04             # fair value at least 4c above Kalshi's ask after the fee
   basis: 0.0003             # allowance for Kalshi settling on the CF Benchmarks index, not Coinbase
   exit_seconds: 150         # last 2.5 min of a window: sell trades that are going wrong

@@ -229,8 +229,35 @@ class LagWatch:
         return out
 
     def real_ask(self, ticker: str, side: str) -> tuple[float | None, int]:
-        """Best ask and size for `side` from Kalshi's live order book (the market listing can lag).
-        Kalshi's book lists bids only: YES ask = 1 - best NO bid, and the reverse."""
+        """Best ask and size for `side`. Fast path: our live copy of the book from the stream (no request).
+        It is checked against Kalshi's order book first and only trusted after 50 checks agree 95%+;
+        every 20th use is re-checked and it switches itself off if agreement drops."""
+        fb = self.stats.setdefault("fast_book", {"checks": 0, "agree": 0, "on": False, "recent": []})
+        local = self.ks.local_ask(ticker, side) if getattr(self, "ks", None) and hasattr(self.ks, "local_ask") else None
+        fb["uses"] = fb.get("uses", 0) + (1 if local else 0)
+        if local and fb.get("on") and fb["uses"] % 20:
+            return local
+        rest = self._rest_ask(ticker, side)
+        if local:
+            ok = (local[0] is None and rest[0] is None) or (
+                local[0] is not None and rest[0] is not None and abs(local[0] - rest[0]) <= 0.011)
+            fb["checks"] += 1
+            fb["agree"] += 1 if ok else 0
+            fb["recent"] = (fb.get("recent", []) + [1 if ok else 0])[-50:]
+            if not ok and fb["checks"] - fb.get("last_mis_log", -100) > 10:
+                fb["last_mis_log"] = fb["checks"]
+                log.info("FASTBOOK mismatch %s %s: live copy %s vs Kalshi %s", ticker, side, local, rest)
+            rate = sum(fb["recent"]) / len(fb["recent"])
+            if not fb["on"] and len(fb["recent"]) >= 50 and rate >= 0.95:
+                fb["on"] = True
+                log.warning("FASTBOOK on: live order books matched Kalshi %d/%d times", sum(fb["recent"]), len(fb["recent"]))
+            elif fb["on"] and len(fb["recent"]) >= 20 and rate < 0.90:
+                fb["on"] = False
+                log.warning("FASTBOOK off: live order books drifted (%.0f%% agreement)", 100 * rate)
+        return rest
+
+    def _rest_ask(self, ticker: str, side: str) -> tuple[float | None, int]:
+        """Kalshi's book lists bids only: YES ask = 1 - best NO bid, and the reverse."""
         j = self.bot.kdata._req("GET", f"/markets/{ticker}/orderbook", params={"depth": 5})
         ob = j.get("orderbook") or j.get("orderbook_fp") or {}
         other = "no" if side == "yes" else "yes"
