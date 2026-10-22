@@ -526,6 +526,7 @@ class LagWatch:
             # crypto windows: hold to settlement (the full gap, one fee) unless the market already pays
             # at least what the trade is worth
             if x.get("close") and self.cfg.get("hold_to_settle", True) and fair is not None and bid < fair:
+                x.setdefault("flip_px", bid)  # what the old quick flip would have sold at
                 continue
             filled, proceeds = self.bot._execute(Target(x["ticker"], x["side"]), "sell", x["count"], bid)
             if filled:
@@ -580,7 +581,7 @@ class LagWatch:
             late = s.get("bid_late")
             lock = n * self._net(e, late, rate) if late is not None else hold
             best = n * self._net(e, s.get("max_bid", s["sold"]), rate)
-            rec = {"ticker": s["ticker"], "side": s["side"], "group": s.get("group"), "n": n, "entry": e,
+            rec = {"held": bool(s.get("held")), "ticker": s["ticker"], "side": s["side"], "group": s.get("group"), "n": n, "entry": e,
                    "sold": s["sold"], "result": res, "flip": round(flip, 2), "hold": round(hold, 2),
                    "lock_2min": round(lock, 2), "best_possible": round(best, 2), "day": time.strftime("%Y-%m-%d")}
             done.append(rec)
@@ -597,6 +598,12 @@ class LagWatch:
             crypto = x["ticker"].startswith(("KXBTC15M", "KXETH15M", "KXBTCD", "KXETHD"))
             return now - x["t0"] > (75 * 60 if crypto else 18 * 3600)
         with self.lock:
+            for x in [x for x in self.stats["trades"] if done(x) and x.get("close")]:
+                sh = self.stats.setdefault("shadow", [])  # held to the end: compare with a quick flip
+                sh.append({"key": x["key"], "ticker": x["ticker"], "side": x["side"], "group": x.get("group"),
+                           "entry": x["entry"], "sold": x.get("flip_px") or x["entry"], "count": x["count"],
+                           "close": x["close"], "t_sell": None, "max_bid": x.get("flip_px") or x["entry"],
+                           "bid_late": None, "held": True})
             self.stats["trades"] = [x for x in self.stats["trades"] if not done(x)]
 
     def _record(self, g: dict) -> None:
