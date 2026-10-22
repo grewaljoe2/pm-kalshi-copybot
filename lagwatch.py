@@ -391,7 +391,8 @@ class LagWatch:
         eq = bot.equity()
         open_cost = sum(x["count"] * x["entry"] for x in self.stats["trades"])
         stake = min(eq * float(self.cfg.get("stake_pct", 0.03)),
-                    eq * float(self.cfg.get("max_open_pct", 0.10)) - open_cost, bot.cash() - 0.5)
+                    eq * float(self.cfg.get("max_open_pct", 0.10)) - open_cost,
+                    bot.cash() - bot.pot_cash() - 0.5)  # main + reserve, never the future pot
         n = int(stake // ask) if stake > 0 else 0
         if n < 1:
             return

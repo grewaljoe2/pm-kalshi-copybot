@@ -138,7 +138,14 @@ combos:
   kelly_fraction: 0.5
   max_combo_pct: 0.10       # at most 10% of balance in one combo
   daily_budget_pct: 0.45    # at most 45% of balance in combos per day (55% stays for whale copies)
-  min_edge: 0.03            # only buy a combo at least 3c under our fair price (after fee)
+  min_edge: 0.03            # only buy a combo at least 3c under our fair price (after fee), +1c per day until it settles
+  far:                      # combos settling 3+ days out: paid from the future pot, bigger tickets first
+    enabled: true
+    sizes: [6, 5, 4, 3]
+    elite_leg_chance: 0.80  # legs allowed in 5-6 leg tickets
+    min_hit_chance: 0.20
+    kelly_fraction: 0.25    # quarter-Kelly on the whole balance (estimate errors multiply across legs)
+    max_combo_pct: 0.15     # one ticket: at most 15% of the pot (about $3 of $20)
   # When whale bets are mostly bad prices on Kalshi today (and none good is waiting),
   # parlays may also use the whale share's idle cash, always keeping 15% of the balance free.
   borrow:
@@ -167,17 +174,25 @@ combos:
 
 # Bankroll mode (sizing: score). Paper mode tracks a virtual bankroll starting here.
 bankroll:
-  start_usd: 98.49          # live: your deposit (used for the Return %)
-  reserve_usd: 0            # extra deposit kept for strong whale trades + lag trades (shared, first come first served)
+  start_usd: 158.49         # live: total deposited (98.49 + 60 on Oct 22; used for the Return %)
+  reserve_usd: 20           # extra deposit kept for strong whale trades + lag trades (shared, first come first served)
   reserve:
     min_score: 80           # strong trade = score 80+ ...
     min_whales: 3           #   ... or 3+ whales on the same side (Best-bets picks always count)
+  future_pot_usd: 20        # separate pot: the ONLY money for bets settling 3+ days out (big NFL parlays etc.)
+                            # wins refill it to this size, profit above goes to the main bankroll; losses shrink it
+  horizon:
+    far_days: 3             # settles 3+ days out -> future pot only
+    edge_per_day: 0.01      # money locked longer needs more edge: +1% per day until settlement ...
+    max_days: 4             #   ... up to +4%
+    max_game_total_pct: 0.15  # whale copies + parlay legs on one game: at most 15% of the main bankroll
+    pot_max_bet_pct: 0.3    # one whale bet from the pot: at most 30% of the pot
   # Growth plan: heavy while small, taper as the account grows. [min score, % of balance per bet]
   stages:
     - name: "1 growth"
       up_to: 300
       max_game_pct: 0.15
-      max_open_pct: 1.0       # growth stage: whole balance can be in play
+      max_open_pct: 0.95      # growth stage: at most 95% of the main bankroll in play (reserve + pot are extra)
       tiers: [[80, 0.12], [65, 0.07], [45, 0.04]]
     - name: "2 taper"
       up_to: 1000

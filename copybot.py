@@ -177,6 +177,12 @@ class State:
         lot["count"] -= count
         lot["cost"] = round(lot["cost"] - cost, 4)
         lot["fee"] = round(lot["fee"] - ofee, 4)
+        if lot.get("pot"):  # future-parlay pot: money comes back to the pot, profit above its size to main
+            pot = self.data.setdefault("pot", {"usd": 0.0, "cash": 0.0})
+            pot["cash"] = round(float(pot.get("cash", 0)) + proceeds - fee, 4)
+            open_pot = sum(l["cost"] + l.get("fee", 0) for l in self.data["lots"] if l.get("pot") and l["count"] > 0)
+            if pot["cash"] + open_pot > float(pot.get("usd", 0)):
+                pot["cash"] = round(max(0.0, float(pot.get("usd", 0)) - open_pot), 4)
 
     def sell_lots(self, ticker: str, side: str, count: int, price: float, fee: float) -> None:
         """FIFO-close lots when we copy a whale's exit."""
@@ -1067,6 +1073,83 @@ class CopyBot:
             return self.balance
         return self.equity() - self.open_cost()
 
+    # ---- future-parlay pot (bets settling 3+ days out live only here) ---------- #
+    def pot_state(self) -> dict:
+        usd = max(0.0, float(self.bank.get("future_pot_usd", 0) or 0))
+        st = self.state.data.setdefault("pot", {"usd": 0.0, "cash": 0.0})
+        if abs(float(st.get("usd", 0)) - usd) > 1e-9:  # pot size changed in settings: add/remove the difference
+            st["cash"] = round(max(0.0, float(st.get("cash", 0)) + usd - float(st.get("usd", 0))), 4)
+            st["usd"] = usd
+        return st
+
+    def pot_open(self) -> float:
+        return sum(l["cost"] + l.get("fee", 0) for l in self.state.data["lots"] if l.get("pot"))
+
+    def pot_waiting(self) -> float:
+        return sum(r["remaining"] * r["price"] for r in self.state.data.get("resting", []) if r.get("pot"))
+
+    def pot_cash(self) -> float:
+        return float(self.pot_state().get("cash", 0)) if self.pot_state()["usd"] > 0 else 0.0
+
+    def pot_value(self) -> float:
+        return self.pot_cash() + self.pot_open()
+
+    def pot_free(self) -> float:
+        return round(max(0.0, min(self.pot_cash() - self.pot_waiting(), self.cash() - 0.5)), 2)
+
+    def _pot_take(self, lot: dict) -> None:
+        """Mark a just-opened bet as paid from the pot."""
+        lot["pot"] = True
+        st = self.pot_state()
+        st["cash"] = round(max(0.0, float(st.get("cash", 0)) - lot["cost"] - lot.get("fee", 0)), 4)
+
+    # ---- when a bet settles, and how much edge that wait needs ---------------- #
+    def settle_ts(self, ticker: str, m: dict | None = None) -> float | None:
+        cache = self.__dict__.setdefault("_settle_cache", {})
+        if ticker in cache:
+            return cache[ticker]
+        try:
+            m = m or self.kdata.market(ticker)
+            v = m.get("expected_expiration_time") or m.get("close_time")
+            ts = datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp() if v else None
+        except Exception:
+            ts = None
+        if ts:
+            cache[ticker] = ts
+        return ts
+
+    def horizon(self) -> dict:
+        return self.bank.get("horizon", {}) or {}
+
+    def days_out(self, settle: float | None) -> float:
+        return max(0.0, (settle - time.time()) / 86400) if settle else 0.0
+
+    def extra_edge(self, days: float) -> float:
+        """Money locked longer must earn more: +1% required edge per day until settlement (max +4%)."""
+        h = self.horizon()
+        return float(h.get("edge_per_day", 0.01)) * min(float(h.get("max_days", 4)), days)
+
+    def is_far(self, days: float) -> bool:
+        return days >= float(self.horizon().get("far_days", 3))
+
+    @staticmethod
+    def game_of(ticker: str) -> str:
+        parts = ticker.split("-")
+        return parts[1] if len(parts) > 1 else ticker
+
+    def game_exposure(self, game: str) -> float:
+        tot = 0.0
+        for l in self.state.data["lots"]:
+            if self.game_of(l["ticker"]) == game or game in (l.get("games") or []):
+                tot += l["cost"] + l.get("fee", 0)
+        for r in self.state.data.get("resting", []):
+            if self.game_of(r["ticker"]) == game or game in (r.get("games") or []):
+                tot += r["remaining"] * r["price"]
+        return tot
+
+    def game_room(self, game: str) -> float:
+        return self.sizing_equity() * float(self.horizon().get("max_game_total_pct", 0.15)) - self.game_exposure(game)
+
     def reserve_usd(self) -> float:
         """Fixed $ reserve (your extra deposit): only strong whale trades and lag trades may use it.
         Ordinary copies and parlays always leave this much cash untouched."""
@@ -1076,8 +1159,8 @@ class CopyBot:
         return round(min(self.reserve_usd(), max(0.0, self.cash())), 2)
 
     def sizing_equity(self) -> float:
-        """Balance used to size ordinary bets: the reserve doesn't make normal bets bigger."""
-        return self.equity() - self.reserve_free()
+        """Balance used to size ordinary bets: the reserve and the future pot don't make normal bets bigger."""
+        return self.equity() - self.reserve_free() - self.pot_value()
 
     def lag_reserve(self) -> float:
         """Cash kept free for live lag trades (only once lag trading is switched on).
@@ -1114,7 +1197,7 @@ class CopyBot:
     def spendable_cash(self, strong: bool = False) -> float:
         """Free cash for whale copies, board picks and parlays (the lag reserve is set aside).
         Ordinary bets also leave the fixed reserve alone; strong trades may use it."""
-        return self.cash() - self.lag_reserve() - (0.0 if strong else self.reserve_usd())
+        return self.cash() - self.pot_cash() - self.lag_reserve() - (0.0 if strong else self.reserve_usd())
 
     def is_strong(self, score: float, same: int = 0) -> bool:
         """Strong trade (may use the reserve): high score, or 3+ whales on the same side."""
@@ -1374,7 +1457,9 @@ class CopyBot:
         held_usd = self.state.position(tgt.ticker, tgt.side) * ask
         if r["sizing"] == "score":
             budget, why = self._bankroll_budget(sc["score"], sc["ev"], held_usd,
-                                                self.is_strong(sc["score"], same))
+                                                self.is_strong(sc["score"], same),
+                                                settle=self.settle_ts(tgt.ticker, m), game=self.game_of(tgt.ticker))
+            use_pot = getattr(self, "_budget_pot", False)
             if why:
                 return self._skip(t, name, why)
             budget *= size_mult
@@ -1403,6 +1488,8 @@ class CopyBot:
             self.state.add_spent(cost + fee)
             self.state.open_lot(name, tgt.ticker, tgt.side, filled, px, fee, t.get("title") or "")
             self.state.data["lots"][-1]["score"] = sc["score"]
+            if r["sizing"] == "score" and use_pot:
+                self._pot_take(self.state.data["lots"][-1])
             self._journal(name, t, tgt, "buy", filled, px, score=sc["score"])
 
     # ---- limit (resting) orders ------------------------------------------- #
@@ -1435,7 +1522,9 @@ class CopyBot:
         sc = score_bet(whale_px=fair_px, ask=price, whale_usd=whale_usd, stats=stats,
                        same=same, opposite=opp, rate=rate)
         held_usd = self.state.position(tgt.ticker, tgt.side) * price
-        budget, why = self._bankroll_budget(sc["score"], sc["ev"], held_usd, self.is_strong(sc["score"], same))
+        budget, why = self._bankroll_budget(sc["score"], sc["ev"], held_usd, self.is_strong(sc["score"], same),
+                                            settle=self.settle_ts(tgt.ticker, m), game=self.game_of(tgt.ticker))
+        use_pot = getattr(self, "_budget_pot", False)
         if why:
             return self._skip(t, name, f"limit: {why}")
         count = math.floor(budget / price)
@@ -1461,7 +1550,7 @@ class CopyBot:
         resting.append({"id": oid, "ticker": tgt.ticker, "side": tgt.side, "price": price, "count": count,
                         "remaining": count, "filled": 0, "fee_rate": rate, "whale": name,
                         "title": t.get("title") or "", "outcome": t.get("outcome"), "score": sc["score"],
-                        "expires": expires, "placed": int(time.time()), "pm_price": fair_px})
+                        "expires": expires, "placed": int(time.time()), "pm_price": fair_px, "pot": use_pot})
         log.info("  LIMIT %s BUY %d %s %s @ %.2f (ask %.2f, fair %.2f) score %d EV %+.1f%%, expires in %.0f min",
                  self.mode.upper(), count, tgt.ticker, tgt.side.upper(), price, ask, fair_px, sc["score"],
                  100 * sc["ev"], (expires - time.time()) / 60)
@@ -1504,6 +1593,10 @@ class CopyBot:
                 self.state.add_spent(new * px + fee)
                 self.state.open_lot(r["whale"], r["ticker"], r["side"], new, px, fee, r["title"])
                 self.state.data["lots"][-1]["score"] = r["score"]
+                if r.get("games"):
+                    self.state.data["lots"][-1]["games"] = r["games"]
+                if r.get("pot"):
+                    self._pot_take(self.state.data["lots"][-1])
                 self._journal(r["whale"], {"title": r["title"], "outcome": r["outcome"], "price": r["pm_price"]},
                               Target(r["ticker"], r["side"]), "buy (limit)", new, px, score=r["score"])
                 log.info("LIMIT FILLED %d %s %s @ %.2f (%s)", new, r["ticker"], r["side"].upper(), px, r["whale"])
@@ -1525,15 +1618,20 @@ class CopyBot:
                                       if not (x["ticker"] == ticker and x["side"] == side)]
 
     def _bankroll_budget(self, score: float, ev: float, held_usd: float,
-                         strong: bool = False) -> tuple[float, str | None]:
+                         strong: bool = False, settle: float | None = None,
+                         game: str | None = None) -> tuple[float, str | None]:
         """$ to stake from the bankroll for a bet with this score, or (0, reason to skip)."""
         from scoring import stake_pct
         b = self.bank
         pct = stake_pct(score, self.current_tiers())
         if pct <= 0:
             return 0.0, f"score {score} below minimum"
+        self._budget_pot = False
         if ev < b.get("min_ev", 0.0):
             return 0.0, f"expected value {100 * ev:+.1f}% after fees"
+        days = self.days_out(settle)
+        if ev < b.get("min_ev", 0.0) + self.extra_edge(days):
+            return 0.0, f"edge {100 * ev:+.1f}% too small for money locked {days:.1f} days"
         eq = self.equity()
         if eq <= self.day_start_equity() * (1 - b.get("daily_stop_pct", 0.15)):
             return 0.0, "daily loss stop reached"
@@ -1541,7 +1639,17 @@ class CopyBot:
         seq = self.sizing_equity()
         budget = seq * pct
         budget = min(budget, seq * self.current_stage().get("max_game_pct", b.get("max_game_pct", 0.08)) - held_usd)
-        budget = min(budget, eq * self.current_stage().get("max_open_pct", b.get("max_open_pct", 0.7)) - self.open_cost())
+        budget = min(budget, seq * self.current_stage().get("max_open_pct", b.get("max_open_pct", 0.7))
+                     - (self.open_cost() - self.pot_open()))
+        if game:
+            budget = min(budget, self.game_room(game))
+        if self.is_far(days) and self.pot_state()["usd"] > 0:  # 3+ days out: only the future pot pays
+            budget = min(seq * pct, self.pot_value() * float(self.horizon().get("pot_max_bet_pct", 0.3)),
+                         self.pot_free(), self.game_room(game) if game else 1e9)
+            if budget < b.get("min_stake_usd", 2.0):
+                return 0.0, "settles 3+ days out and the future pot has no room"
+            self._budget_pot = True
+            return budget, None
         free = self.spendable_cash(strong)
         if strong and self.reserve_usd() > 0 and self.spendable_cash() < budget <= free:
             log.info("  using the reserve for a strong trade (score %.0f)", score)
@@ -1608,7 +1716,9 @@ class CopyBot:
                 continue  # only bet games confirmed not to have started
             log.info("[Board] %s %s -> %s %s  score %d EV %+.1f%%  (%d traders: %s)", p["title"], p["outcome"],
                      p["ticker"], p["side"].upper(), p["score"], 100 * p["ev"], p["whales"], ", ".join(p["names"]))
-            budget, why = self._bankroll_budget(p["score"], p["ev"], 0.0, strong=True)  # 3+ whales agree
+            budget, why = self._bankroll_budget(p["score"], p["ev"], 0.0, strong=True,  # 3+ whales agree
+                                                settle=self.settle_ts(p["ticker"]), game=self.game_of(p["ticker"]))
+            use_pot = getattr(self, "_budget_pot", False)
             if why:
                 self._skip(t, name, why)
                 continue
@@ -1625,6 +1735,8 @@ class CopyBot:
                 self.state.add_spent(cost + fee)
                 self.state.open_lot(name, tgt.ticker, tgt.side, filled, px, fee, p["title"])
                 self.state.data["lots"][-1]["score"] = p["score"]
+                if use_pot:
+                    self._pot_take(self.state.data["lots"][-1])
                 self._journal(name, t, tgt, "buy", filled, px, score=p["score"])
 
     def _copy_sell(self, addr, name, t, tgt: Target, whale_px, sold) -> None:
@@ -1883,9 +1995,10 @@ class CopyBot:
         from zoneinfo import ZoneInfo
         day0 = datetime.now(ZoneInfo(LOCAL_TZ)).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         bought = sum(float(l.get("cost", 0)) + float(l.get("fee", 0)) for l in self.state.data.get("lots", [])
-                     if str(l.get("whale", "")).startswith("Combo") and float(l.get("opened", 0)) >= day0)
+                     if str(l.get("whale", "")).startswith("Combo") and float(l.get("opened", 0)) >= day0
+                     and not l.get("pot"))
         waiting = sum(float(r.get("price", 0)) * float(r.get("remaining", 0)) for r in self.state.data.get("resting", [])
-                      if str(r.get("whale", "")).startswith("Combo"))
+                      if str(r.get("whale", "")).startswith("Combo") and not r.get("pot"))
         return round(bought + waiting, 2)
 
     def _add_combo_spent(self, usd: float) -> None:
@@ -1948,16 +2061,27 @@ class CopyBot:
                 continue
             lg_legs = [l for l in legs if self._combo_league(l["market_ticker"]) == lg and l["market_ticker"] not in used
                        and (not l.get("start") or l["start"] < time.time() + float(lc.get("max_hours_ahead", 30)) * 3600)]
-            plan = self._plan_slate(lg_legs, cc, lc.get("sizes") or [2, 3, 4])
-            if not plan:
+            fc = cc.get("far", {}) or {}
+            far_on = self.pot_state()["usd"] > 0 and fc.get("enabled", True)
+            far_s = float(self.horizon().get("far_days", 3)) * 86400 - 4 * 3600  # game start that settles 3+ days out
+            near_legs = [l for l in lg_legs if not far_on or not l.get("start") or l["start"] - time.time() < far_s]
+            far_legs = [l for l in lg_legs if far_on and l.get("start") and l["start"] - time.time() >= far_s]
+            plan = self._plan_slate(near_legs, cc, lc.get("sizes") or [2, 3, 4])
+            fcc = dict(cc, elite_leg_chance=float(fc.get("elite_leg_chance", 0.80)),
+                       min_hit_chance=float(fc.get("min_hit_chance", 0.20)))
+            far_plan = self._plan_slate(far_legs, fcc, fc.get("sizes") or [6, 5, 4, 3]) if far_legs else []
+            if not plan and not far_plan:
                 if lg_legs:
                     log.info("COMBO %s: %d strong legs, not enough for a combo yet", lg, len(lg_legs))
                 continue
-            rows = self._run_slate(lg, plan, cc)
-            for combo, row in zip(plan, rows):
+            rows = self._run_slate(lg, plan, cc) if plan else []
+            far_rows = self._run_slate(lg, far_plan, cc, pot=True) if far_plan else []
+            for combo, row in list(zip(plan, rows)) + list(zip(far_plan, far_rows)):
                 if row.get("placed"):
                     for l in combo:
                         used[l["market_ticker"]] = time.time()
+            rows = rows + far_rows
+            plan = plan + far_plan
             last_by[lg] = time.time()
             slates = [s for s in slates if s.get("league") != lg] + [
                 {"league": lg, "built": time.time(), "combos": rows, "legs_available": len(lg_legs),
@@ -2098,6 +2222,11 @@ class CopyBot:
                 fee = kalshi_fee(missing, px, self.fee_rate)
                 self.state.add_position(tk, "yes", missing)
                 self.state.open_lot("Combo (quote)", tk, "yes", missing, px, fee, title)
+                pend = (self.state.data.get("combo_pending") or {}).pop(tk, None)
+                if pend:
+                    self.state.data["lots"][-1]["games"] = pend.get("games") or []
+                    if pend.get("pot"):
+                        self._pot_take(self.state.data["lots"][-1])
                 log.info("COMBO reconciled %d contracts of %s @ %.3f bought through a quote", missing, tk, px)
         self.state.save()
 
@@ -2124,10 +2253,17 @@ class CopyBot:
         why = f"whale bets today: {copied} copied, {bad} bad prices, {pending} good waiting"
         return ok, why
 
-    def _combo_stake(self, hit: float, price: float, cc: dict) -> float:
-        """Half-Kelly on the edge, capped per combo and by what's left of today's combo budget."""
+    def _combo_stake(self, hit: float, price: float, cc: dict, pot: bool = False) -> float:
+        """Half-Kelly on the edge, capped per combo and by what's left of today's combo budget.
+        Future-pot combos (3+ days out): quarter-Kelly of the pot, paid only from the pot."""
         if price <= 0 or price >= 1 or hit <= price:
             return 0.0
+        if pot:
+            fc = cc.get("far", {}) or {}
+            pv = self.pot_value()  # quarter-Kelly on the whole balance, capped per ticket by the pot
+            stake = self.equity() * (hit - price) / (1 - price) * float(fc.get("kelly_fraction", 0.25))
+            stake = min(stake, pv * float(fc.get("max_combo_pct", 0.15)), self.pot_free())
+            return round(stake, 2) if stake >= float(cc.get("min_stake_usd", 1.0)) else 0.0
         eq = self.sizing_equity()
         kelly = (hit - price) / (1 - price)
         stake = eq * kelly * float(cc.get("kelly_fraction", 0.5))
@@ -2139,21 +2275,28 @@ class CopyBot:
         stake = min(stake, left, max(0.0, self.spendable_cash() - 0.5))
         return round(stake, 2) if stake >= float(cc.get("min_stake_usd", 1.0)) else 0.0
 
-    def _run_slate(self, lg: str, plan: list[list[dict]], cc: dict) -> list[dict]:
+    def _run_slate(self, lg: str, plan: list[list[dict]], cc: dict, pot: bool = False) -> list[dict]:
         from scoring import fee_per_contract
         dry = cc.get("dry_run", True)
-        min_edge = float(cc.get("min_edge", 0.03))
         rows = []
         for combo in sorted(plan, key=lambda c: -self._combo_fair(c)):
             hit = self._combo_fair(combo)
+            starts = [l["start"] for l in combo if l.get("start")]
+            days = self.days_out(max(starts) + 4 * 3600) if starts else 0.0
+            min_edge = float(cc.get("min_edge", 0.03)) + self.extra_edge(days)  # longer wait, bigger edge
             max_px = round(hit - min_edge - fee_per_contract(hit, self.fee_rate), 4)  # most we'll pay
             combo_tk, cm, errs = self._build_combo(combo)
             row = {"legs": [l["title"] for l in combo], "size": len(combo), "hit": round(hit, 3),
                    "ticker": combo_tk, "max_price": max_px, "price": None, "count": 0, "stake": 0.0,
                    "payout": 0, "action": "not offered" if not combo_tk else "", "placed": False,
-                   "same_game": len({l["game"] for l in combo}) < len(combo),
+                   "same_game": len({l["game"] for l in combo}) < len(combo), "pot": pot,
                    "note": "; ".join(errs[-1:]) if not combo_tk else ""}
-            stake = self._combo_stake(hit, max_px, cc)
+            stake = self._combo_stake(hit, max_px, cc, pot)
+            games = sorted({l["game"] for l in combo})
+            if stake > 0:  # per-game cap across whale copies + parlays
+                stake = max(0.0, min([stake] + [self.game_room(g) for g in games]))
+                if stake < float(cc.get("min_stake_usd", 1.0)):
+                    stake = 0.0
             if combo_tk and stake <= 0:
                 row["action"] = "skip (budget/edge)"
             elif combo_tk and not dry and self.mode == "live":
@@ -2167,17 +2310,21 @@ class CopyBot:
                     self.state.add_position(combo_tk, "yes", n)
                     self.state.add_spent(n * px + fee)
                     self.state.open_lot(name, combo_tk, "yes", n, px, fee, title)
+                    self.state.data["lots"][-1]["games"] = games
+                    if pot:
+                        self._pot_take(self.state.data["lots"][-1])
                     self._journal(name, {"title": title, "outcome": "combo", "price": hit},
                                   Target(combo_tk, "yes"), "buy", n, px)
                     row.update(action="BOUGHT (quote)", price=px, count=n, stake=round(n * px, 2), payout=n, placed=True)
                 elif q.get("accepted"):
                     row.update(action=f"quote accepted ({q['status']}), checking fills", price=q.get("best"), placed=True)
                     self._add_combo_spent(stake)
+                    self.state.data.setdefault("combo_pending", {})[combo_tk] = {"pot": pot, "games": games}
                 else:
                     # no maker quote at our price: wait with a limit order a bit under fair
                     px = math.floor(max_px * 100) / 100
                     count = math.floor(stake / px) if px > 0 else 0
-                    ok = count >= 1 and self._place_combo(combo_tk, combo, hit, None, px, count, False)
+                    ok = count >= 1 and self._place_combo(combo_tk, combo, hit, None, px, count, False, pot)
                     if q.get("error"):
                         log.warning("COMBO quote request error: %s", q["error"])
                     row.update(action=f"LIMIT (quote {q['status']}{' ' + str(q.get('best')) if q.get('best') else ''})",
@@ -2186,13 +2333,14 @@ class CopyBot:
                 px = max_px
                 count = math.floor(stake / px) if px > 0 else 0
                 row.update(action="(test) would request quote", price=px, count=count, stake=round(count * px, 2), payout=count)
-            log.info("COMBO %s %d-leg%s hit %.0f%% max %s %s -> %s %s x%d (stake $%.2f, pays $%d) %s",
-                     lg, len(combo), " same-game" if row["same_game"] else "", 100 * hit, max_px, row["legs"],
+            log.info("COMBO %s%s %d-leg%s hit %.0f%% max %s %s -> %s %s x%d (stake $%.2f, pays $%d) %s",
+                     lg, " future-pot" if pot else "", len(combo), " same-game" if row["same_game"] else "",
+                     100 * hit, max_px, row["legs"],
                      row["action"], row["price"], row["count"], row["stake"], row["payout"], row["note"])
             rows.append(row)
         return rows
 
-    def _place_combo(self, combo_tk, legs, fair, ask, price, count, take) -> bool:
+    def _place_combo(self, combo_tk, legs, fair, ask, price, count, take, pot: bool = False) -> bool:
         tgt = Target(combo_tk, "yes")
         name = f"Combo {len(legs)}-leg"
         title = " + ".join(l["title"] for l in legs)
@@ -2213,7 +2361,8 @@ class CopyBot:
                 {"id": oid, "ticker": combo_tk, "side": "yes", "price": price, "count": count,
                  "remaining": count, "filled": 0, "fee_rate": 0.0175, "whale": name, "title": title,
                  "outcome": "combo", "score": None, "expires": expires, "placed": int(time.time()),
-                 "pm_price": fair, "legs_tickers": ",".join(l["market_ticker"] for l in legs)})
+                 "pm_price": fair, "legs_tickers": ",".join(l["market_ticker"] for l in legs),
+                 "games": sorted({l["game"] for l in legs}), "pot": pot})
         return bool(oid)
 
     def check_settlements(self) -> None:
@@ -2269,6 +2418,9 @@ class CopyBot:
             "lag_reserve": round(self.lag_reserve(), 2),
             "reserve_usd": self.reserve_usd(),
             "reserve_free": self.reserve_free(),
+            "pot_usd": self.pot_state()["usd"],
+            "pot_free": self.pot_free(),
+            "pot_open": round(self.pot_open(), 2),
             "start_usd": float(self.bank.get("start_usd", 100)),
             "stage": self.current_stage().get("name"),
             "lagwatch": self.state.data.get("lagwatch") or {},
