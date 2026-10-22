@@ -326,8 +326,19 @@ class LagWatch:
         n = int(stake // ask) if stake > 0 else 0
         if n < 1:
             return
-        filled, cost = bot._execute(Target(p["ticker"], p["side"]), "buy", n, ask)
+        if bot.mode == "live":
+            # take whatever is available at the gap price (thin books: all-or-nothing orders fail)
+            try:
+                o = bot.kalshi.create_order(p["ticker"], p["side"], "buy", n, ask, "immediate_or_cancel")
+                filled = int(float(o.get("fill_count") or 0))
+            except Exception as e:
+                log.info("LAGTRADE buy failed %s: %s", p["ticker"], str(e)[:120])
+                return
+            cost = filled * ask
+        else:
+            filled, cost = bot._execute(Target(p["ticker"], p["side"]), "buy", n, ask)
         if not filled:
+            log.info("LAGTRADE [%s] no contracts left at %.2f on %s", grp, ask, p["ticker"])
             return
         px = cost / filled
         bot.ledger_queue.append(("open", f"Lag trade · {grp}", p["ticker"], p["side"], filled, px, p["title"]))
