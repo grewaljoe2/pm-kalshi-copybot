@@ -562,6 +562,13 @@ class LagWatch:
                 log.warning("LAG OFF for today: Kalshi says BTC/ETH lag is %+.2f after fees", truth)
             return pct, max_open, "daily stop (Kalshi)"
         pnl_today, _ = self.day_pnl(today)
+        rid = str(self.cfg.get("stop_reset", ""))
+        b = st.get("stop_base") or {}
+        if rid and (b.get("rid") != rid or b.get("day") != today):  # manual reset: count today's stop from now
+            b = st["stop_base"] = {"rid": rid, "day": today, "pnl": pnl_today}
+            log.warning("LAGWATCH daily stop reset: counting from now (today so far $%.2f)", pnl_today)
+        if b.get("day") == today and b.get("rid") == rid:
+            pnl_today -= float(b.get("pnl", 0))
         if pnl_today < -eq * float(self.cfg.get("daily_stop_pct", 0.05)):
             if st.get("stopped_day") != today:
                 st["stopped_day"] = today
