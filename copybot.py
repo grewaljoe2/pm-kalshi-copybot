@@ -2250,7 +2250,11 @@ class CopyBot:
                     cost = float(p.get("market_exposure_dollars") or 0)
                     px = round(cost / held, 4) if held and cost else 0.5
                     self.state.add_position(tk, side, miss)
-                    self.state.open_lot("Recovered", tk, side, miss, px, kalshi_fee(miss, px, self.fee_rate), tk)
+                    mm = getattr(self, "mm", None)
+                    name, fee = "Recovered", kalshi_fee(miss, px, self.fee_rate)
+                    if mm and mm.covers(tk):  # a market-maker fill we missed during a restart
+                        name, fee = f'MM · {tk[2:].split("15M")[0]} 15m', 0.0
+                    self.state.open_lot(name, tk, side, miss, px, fee, tk)
                     log.info("RECOVER %d %s %s @ %.3f from Kalshi into the records", miss, tk, side.upper(), px)
                     self._net_ledger(tk)
                 continue

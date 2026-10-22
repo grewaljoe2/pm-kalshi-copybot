@@ -37,6 +37,9 @@ class MarketMaker:
 
     def _rebuild_from_ledger(self) -> None:
         """Holdings per window come from the bot's open lots (the source of truth after a restart)."""
+        for rec in self.bot.state.data.get("lots", []) + self.bot.state.data.get("closed", []):
+            if rec.get("whale") == "Recovered" and self.covers(rec.get("ticker", "")):
+                rec["whale"] = f'MM · {rec["ticker"][2:].split("15M")[0]} 15m'  # missed MM fills, credit them to MM
         inv: dict[str, dict] = {}
         for l in self.bot.state.data.get("lots", []):
             if str(l.get("whale", "")).startswith("MM ") and l.get("count", 0) > 0:
@@ -262,6 +265,8 @@ class MarketMaker:
                    "bid above value" if (bid >= value + 0.01 and net > 0) else
                    "locking profit near close" if (left <= float(self.cfg.get("lock_last_s", 240)) and net >= 0.01) else
                    why_l)
+            if not why and left >= 300 and value <= 0.5 * avg and bid >= 0.75 * value:
+                why = f"model stop: worth {value:.2f} vs cost {avg:.2f}"
             if not why:
                 continue
             filled, proceeds = self.bot._execute(Target(tk, side), "sell", n, bid)

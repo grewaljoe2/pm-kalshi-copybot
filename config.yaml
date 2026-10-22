@@ -114,6 +114,8 @@ lag_watch:
   exit_min_bid_share: 0.75  # late exit only if someone pays 75%+ of model value
   profit_ladder: true       # up 10%+ -> never below break-even; 30%+ keeps 40% of gain, 60%+ 60%, 100%+ 70%
   ladder_model_margin: 0.08 # skip the stop if the model still values it 8c+ above the floor (a book dip)
+  model_stop: true          # 5+ min left: sell if the model values the trade at half the entry or less (and bid pays 75%+ of that)
+  stop_value_share: 0.5
 
 
 # Crypto lag: Kalshi BTC/ETH 15-minute up/down and hourly above/below vs the live Coinbase price.

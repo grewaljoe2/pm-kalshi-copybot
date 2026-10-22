@@ -632,15 +632,23 @@ class LagWatch:
         del sh[:-300]
 
     def paper_stop(self, ticker: str, fair_yes: float, yes_bid: float, yes_ask: float, secs_left: float) -> None:
-        """Paper only: with 5+ min left, if a trade's model value falls to half its entry and someone pays
-        75%+ of that value, note the price an early stop-loss would have sold at."""
-        for x in self.stats.get("trades", []):
-            if x["ticker"] != ticker or x.get("stop_px") is not None or secs_left < 300:
-                continue
-            fair = fair_yes if x["side"] == "yes" else 1 - fair_yes
-            bid = yes_bid if x["side"] == "yes" else 1 - yes_ask
-            if fair <= 0.5 * x["entry"] and bid >= 0.75 * fair:
-                x["stop_px"] = round(bid, 4)
+        """Model stop: with 5+ min left, if a trade's model value falls to half its entry (the coin really
+        moved against us) and someone pays 75%+ of that value, sell (model_stop true) or just note it."""
+        live = self.cfg.get("model_stop", True)
+        with self.lock:
+            for x in [x for x in self.stats.get("trades", []) if x["ticker"] == ticker]:
+                if x.get("stop_px") is not None or secs_left < 300:
+                    continue
+                fair = fair_yes if x["side"] == "yes" else 1 - fair_yes
+                bid = yes_bid if x["side"] == "yes" else 1 - yes_ask
+                if bid is None or bid < 0.02:
+                    continue
+                if fair <= float(self.cfg.get("stop_value_share", 0.5)) * x["entry"] and \
+                        bid >= float(self.cfg.get("exit_min_bid_share", 0.75)) * fair:
+                    x["stop_px"] = round(bid, 4)
+                    if live:
+                        self._sell(x, bid, getattr(self.bot, "fee_rate", 0.07),
+                                   f"(model stop: worth {fair:.2f} vs bought {x['entry']:.2f})")
 
     def shadow_bid(self, key: str, bid: float, now: float) -> None:
         for s in self.stats.get("shadow", []):  # what a sold trade would have been worth if kept
