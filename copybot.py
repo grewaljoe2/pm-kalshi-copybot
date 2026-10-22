@@ -951,6 +951,7 @@ class CopyBot:
                 try:
                     old = self.balance
                     self.balance = self.kalshi.balance_usd()
+                    self._unsynced = 0.0
                     if old is None or abs(self.balance - old) >= 5:
                         log.info("BALANCE cash $%.2f (was %s): main free $%.2f, reserve ready $%.2f, "
                                  "future pot free $%.2f, equity $%.2f", self.balance,
@@ -1076,7 +1077,7 @@ class CopyBot:
 
     def cash(self) -> float:
         if self.mode == "live" and self.balance is not None:
-            return self.balance
+            return self.balance - getattr(self, "_unsynced", 0.0)  # orders placed since the last balance read
         return self.equity() - self.open_cost()
 
     # ---- future-parlay pot (bets settling 3+ days out live only here) ---------- #
@@ -1553,6 +1554,7 @@ class CopyBot:
             oid = o.get("order_id")
         else:
             oid = f"paper-{uuid.uuid4()}"
+        self._commit(count * price)
         resting.append({"id": oid, "ticker": tgt.ticker, "side": tgt.side, "price": price, "count": count,
                         "remaining": count, "filled": 0, "fee_rate": rate, "whale": name,
                         "title": t.get("title") or "", "outcome": t.get("outcome"), "score": sc["score"],
@@ -2311,6 +2313,7 @@ class CopyBot:
                 if q["status"] == "filled":
                     n, px = int(q["count"]), float(q["price"])
                     fee = kalshi_fee(n, px, self.fee_rate)
+                    self._commit(n * px + fee)
                     title = " + ".join(row["legs"])
                     name = f"Combo {len(combo)}-leg"
                     self.state.add_position(combo_tk, "yes", n)
@@ -2325,6 +2328,7 @@ class CopyBot:
                 elif q.get("accepted"):
                     row.update(action=f"quote accepted ({q['status']}), checking fills", price=q.get("best"), placed=True)
                     self._add_combo_spent(stake)
+                    self._commit(stake)
                     self.state.data.setdefault("combo_pending", {})[combo_tk] = {"pot": pot, "games": games}
                 else:
                     # no maker quote at our price: wait with a limit order a bit under fair
@@ -2363,6 +2367,7 @@ class CopyBot:
                 log.error("combo limit order failed: %s", e)
                 oid = None
         if oid:
+            self._commit(count * price)
             self.state.data.setdefault("resting", []).append(
                 {"id": oid, "ticker": combo_tk, "side": "yes", "price": price, "count": count,
                  "remaining": count, "filled": 0, "fee_rate": 0.0175, "whale": name, "title": title,
@@ -2385,7 +2390,17 @@ class CopyBot:
                 n = self.state.settle(tk, result)
                 log.info("SETTLED %s result=%s (%d lots)", tk, result, n)
 
+    def _commit(self, usd: float) -> None:
+        """Money just put into an order: count it before Kalshi's balance is read again."""
+        self._unsynced = getattr(self, "_unsynced", 0.0) + max(0.0, usd)
+
     def _execute(self, tgt: Target, action: str, count: int, px: float) -> tuple[int, float]:
+        res = self._execute_raw(tgt, action, count, px)
+        if action == "buy" and res[0]:
+            self._commit(res[1] * (1 + self.fee_rate * (1 - px)))
+        return res
+
+    def _execute_raw(self, tgt: Target, action: str, count: int, px: float) -> tuple[int, float]:
         if self.mode != "live":
             log.info("  PAPER %s %d %s %s @ %.3f", action.upper(), count,
                      tgt.ticker, tgt.side.upper(), px)

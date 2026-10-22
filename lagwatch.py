@@ -405,6 +405,8 @@ class LagWatch:
                 log.info("LAGTRADE buy failed %s: %s", p["ticker"], str(e)[:120])
                 return
             cost = filled * (float(o.get("average_fill_price") or 0) or ask)
+            if hasattr(bot, "_commit"):
+                bot._commit(cost)
             g = self._g(grp)
             g["attempts"] = g.get("attempts", 0) + 1
             g["fills"] = g.get("fills", 0) + (1 if filled else 0)
