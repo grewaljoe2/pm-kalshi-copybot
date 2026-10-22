@@ -157,6 +157,9 @@ class CryptoLag:
     def __init__(self, bot, lagwatch, stream, cfg: dict):
         self.bot, self.lw, self.ks, self.cfg = bot, lagwatch, stream, cfg or {}
         self.coins = CoinStream(tuple(sorted({p for p, _ in SERIES.values()}))).start()
+        from mm import MarketMaker
+        self.mm = MarketMaker(bot, self, (self.cfg.get("mm") or {}))
+        bot.mm = self.mm
         self.markets: dict[str, dict] = {}
         self._last_disc = 0.0
         self._logged_series: set[str] = set()
@@ -197,6 +200,7 @@ class CryptoLag:
                         continue
                 keep[m["ticker"]] = info
         self.markets = keep
+        self.mm.prune(keep)
         if self.ks:
             self.ks.watch(list(keep))
             if hasattr(self.ks, "watch_books"):  # live books only where speed matters (15-minute markets)
@@ -254,6 +258,12 @@ class CryptoLag:
                 continue
             fy = self.fair_yes(m)
             if fy is None:
+                continue
+            if self.mm.covers(tk):  # market-maker coins: quotes only, no lag trades (they'd net against each other)
+                try:
+                    self.mm.step(tk, m, fy, q, now)
+                except Exception as e:
+                    log.warning("mm step failed %s: %s", tk, e)
                 continue
             self.lw.paper_stop(tk, fy, q["yes_bid"], q["yes_ask"], m["close"] - now)  # test only, no orders
             if m["close"] - now <= exit_s:  # last minutes: get out of trades that are going wrong

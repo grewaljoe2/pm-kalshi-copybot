@@ -916,8 +916,18 @@ class CopyBot:
     # ---- main loop ------------------------------------------------------- #
     def _apply_ledger_queue(self) -> None:
         while self.ledger_queue:
-            op, name, tk, sd, n, px, title = self.ledger_queue.pop(0)
-            fee = kalshi_fee(n, px, self.fee_rate)
+            item = self.ledger_queue.pop(0)
+            if item[0] == "net":  # market maker: YES and NO in one market cancel out, $1 per pair back now
+                _, name, tk, n, ay, an = item
+                self.state.add_position(tk, "yes", -n)
+                self.state.add_position(tk, "no", -n)
+                self.state.sell_lots(tk, "yes", n, 1 - an, 0.0)  # pair profit lands on the YES side
+                self.state.sell_lots(tk, "no", n, an, 0.0)
+                self._journal(name, {"title": f"pair x{n}", "outcome": "pair", "price": 1 - ay - an},
+                              Target(tk, "yes"), f"pair done (+{100 * (1 - ay - an):.0f}c each)", n, ay + an)
+                continue
+            op, name, tk, sd, n, px, title = item
+            fee = 0.0 if str(name).startswith("MM ") else kalshi_fee(n, px, self.fee_rate)  # maker fills: no fee
             tgt = Target(tk, sd)
             if op == "open":
                 self.state.add_position(tk, sd, n)
@@ -1092,6 +1102,8 @@ class CopyBot:
     def cash(self) -> float:
         if self.mode == "live" and self.balance is not None:
             waiting = sum(r["remaining"] * r["price"] for r in self.state.data.get("resting", []))
+            mm = getattr(self, "mm", None)
+            waiting += mm.waiting_usd() if mm else 0.0  # market-maker quotes waiting on Kalshi
             # minus fills since the last balance read, minus money promised to waiting orders
             return self.balance - getattr(self, "_unsynced", 0.0) - waiting
         return self.equity() - self.open_cost()

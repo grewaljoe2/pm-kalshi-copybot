@@ -124,6 +124,22 @@ crypto_lag:
   exit_seconds: 150         # last 2.5 min of a window: sell trades that are going wrong
   exit_below: 0.25          #   = our model gives them under 25% (or the bid pays more than they're worth)
   min_price: 0.10           # skip contracts under 10c / over 90c (model least reliable there)
+  mm:                       # two-sided market making (resting YES + NO quotes around fair value)
+    enabled: true
+    coins: [SOL, XRP, DOGE] # 15-minute markets of these coins (no lag trades there)
+    size: 5                 # contracts per quote
+    half_spread: 0.03       # quote 3c either side of fair value
+    max_inventory: 10       # at most 10 contracts more on one side than the other
+    lean_per_contract: 0.002
+    reprice_c: 0.02         # move a quote once fair value moved 2c+
+    min_replace_s: 4        # ... and not more often than every 4s per side
+    poll_s: 2               # check our quotes for fills every 2s
+    fair_min: 0.20          # no new quotes when fair value is under 20% / over 80%
+    trend_z: 2.0            # 2-minute move over 2 std devs (this coin or BTC) = trend
+    vol_spike: 2.0          # last-5-min volatility over 2x normal = pull quotes
+    stop_before_close_s: 180
+    expire_before_close_s: 150  # Kalshi cancels our quotes itself 2.5 min before close
+    daily_stop_usd: 8       # stop quoting for the day after losing $8
 
 # When buying at Kalshi's ask isn't worth it, rest a post-only limit order at a fair price
 # (maker fees are 0 on most Kalshi markets, at most 1/4 of the taker fee on NFL/NBA).
