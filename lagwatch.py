@@ -80,6 +80,9 @@ class LagWatch:
         if not st.get("verified_v1"):  # earlier gaps weren't checked against the order book: re-prove
             st["verified_v1"] = True
             st.update(gaps=0, converged=0, examples=[], groups={}, mode="watch", phantom=0)
+        if not st.get("crypto_reset_v1"):  # first crypto minutes used an unwarmed model: discard
+            st["crypto_reset_v1"] = True
+            st["groups"] = {k: v for k, v in st.get("groups", {}).items() if k.split(" ")[0] not in ("BTC", "ETH")}
         self.stats = st
         for name in list(st["groups"]):  # settings may have changed: re-check every league now
             self._maybe_switch(name)
