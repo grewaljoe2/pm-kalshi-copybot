@@ -1212,7 +1212,7 @@ class CopyBot:
 
     def sizing_equity(self) -> float:
         """Balance used to size ordinary bets: the reserve and the future pot don't make normal bets bigger."""
-        return self.equity() - self.reserve_free() - self.pot_value()
+        return max(0.0, self.equity() - self.reserve_free() - self.pot_value() - self.crypto_pot_usd())
 
     def lag_reserve(self) -> float:
         """Cash kept free for live lag trades (only once lag trading is switched on).
@@ -1246,10 +1246,23 @@ class CopyBot:
                                else round(min(self.lag_reserve(), max(0.0, self.cash())), 2))
         return out
 
+    def crypto_pot_usd(self) -> float:
+        """Money deposited only for lag trades + the market maker: whales, combos and board picks never use it."""
+        return max(0.0, float(self.bank.get("crypto_pot_usd", 0) or 0))
+
+    def crypto_open(self) -> float:
+        return sum(l["cost"] for l in self.state.data.get("lots", [])
+                   if l.get("count", 0) > 0 and str(l.get("whale", "")).startswith(("Lag trade", "MM ")))
+
+    def crypto_pot_held(self) -> float:
+        """The part of the crypto pot that is sitting in cash right now (the rest is in open crypto trades)."""
+        return max(0.0, self.crypto_pot_usd() - self.crypto_open())
+
     def spendable_cash(self, strong: bool = False) -> float:
         """Free cash for whale copies, board picks and parlays (the lag reserve is set aside).
-        Ordinary bets also leave the fixed reserve alone; strong trades may use it."""
-        return self.cash() - self.pot_cash() - self.lag_reserve() - (0.0 if strong else self.reserve_usd())
+        Ordinary bets also leave the fixed reserve alone; strong trades may use it. The crypto pot is never theirs."""
+        return (self.cash() - self.pot_cash() - self.lag_reserve() - self.crypto_pot_held()
+                - (0.0 if strong else self.reserve_usd()))
 
     def is_strong(self, score: float, same: int = 0) -> bool:
         """Strong trade (may use the reserve): high score, or 3+ whales on the same side."""

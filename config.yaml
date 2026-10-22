@@ -214,6 +214,7 @@ bankroll:
     min_score: 80           # strong trade = score 80+ ...
     min_whales: 3           #   ... or 3+ whales on the same side (Best-bets picks always count)
   future_pot_usd: 20        # separate pot: the ONLY money for bets settling 3+ days out (big NFL parlays etc.)
+  crypto_pot_usd: 0         # deposit just for lag trades + market maker (whales/combos never use it)
                             # wins refill it to this size, profit above goes to the main bankroll; losses shrink it
   horizon:
     far_days: 3             # settles 3+ days out -> future pot only
