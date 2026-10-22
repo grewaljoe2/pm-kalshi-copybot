@@ -309,6 +309,9 @@ class Polymarket:
             info["tokens"] = {str(o): str(tk) for o, tk in zip(outs, toks)}
         except Exception as e:
             log.debug("gamma lookup failed: %s", e)
+        if len(self._info_cache) > 3000:  # keep the cache bounded
+            for k in sorted(self._info_cache, key=lambda k: self._info_cache[k][0])[:1000]:
+                del self._info_cache[k]
         self._info_cache[condition_id] = (time.time(), info)
         return info
 

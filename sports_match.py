@@ -145,8 +145,19 @@ class SportsMatcher:
             cursor = j.get("cursor")
             if not cursor:
                 break
-        self._cache[series] = (time.time(), out)
-        return out
+        keep = ("ticker", "event_ticker", "title", "subtitle", "yes_sub_title", "no_sub_title", "floor_strike",
+                "cap_strike", "strike_type", "close_time", "expected_expiration_time", "status")
+        slim = []
+        for m in out:  # keep only what matching needs (full listings with rules text eat memory)
+            d = {k: m.get(k) for k in keep if m.get(k) is not None}
+            if m.get("rules_primary"):
+                d["rules_primary"] = m["rules_primary"][:300]
+            slim.append(d)
+        now = time.time()
+        for k in [k for k, v in self._cache.items() if now - v[0] > 2 * self.cache_seconds]:
+            del self._cache[k]  # drop stale leagues instead of keeping every listing forever
+        self._cache[series] = (now, slim)
+        return slim
 
     # ------------------------------------------------------------------ #
     def classify(self, t: dict) -> dict | None:

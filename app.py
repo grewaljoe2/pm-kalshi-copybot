@@ -102,6 +102,39 @@ def _lots_audit():
 _register("lots-audit", _lots_audit)
 
 
+def _mem_watch():
+    """Log memory every 10 min; if it nears Render's 512 MB limit, save records and restart cleanly
+    (instead of being killed mid-order)."""
+    import gc
+    limit_mb = float(os.environ.get("MEM_RESTART_MB", "460"))
+    last_log = 0.0
+    while True:
+        time.sleep(30)
+        try:
+            rss = 0.0
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        rss = float(line.split()[1]) / 1024
+            if time.time() - last_log > 600:
+                last_log = time.time()
+                log.info("MEMORY %.0f MB (restart at %.0f MB)", rss, limit_mb)
+            if rss > limit_mb:
+                gc.collect()
+                with open("/proc/self/status") as f:
+                    rss = next(float(l.split()[1]) / 1024 for l in f if l.startswith("VmRSS:"))
+                if rss > limit_mb:
+                    log.warning("MEMORY %.0f MB near the limit: saving records and restarting cleanly", rss)
+                    if BOT is not None:
+                        BOT.state.save()
+                    os._exit(3)  # Render starts the bot again within about a minute
+        except Exception as e:
+            log.warning("memory watch: %s", e)
+
+
+_register("mem-watch", _mem_watch)
+
+
 # ---- player props (rated from ESPN game logs, refreshed every 30 min) ------- #
 PROPS: dict = {"picks": [], "updated": None, "error": None}
 
