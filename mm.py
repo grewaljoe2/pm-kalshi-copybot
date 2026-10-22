@@ -171,10 +171,7 @@ class MarketMaker:
                     continue
                 try:
                     self.bot.kalshi.cancel_order(oid, tk)
-                    left = self.bot.kalshi._req("GET", f"/portfolio/orders/{oid}").get("order", {}).get("status")
-                    log.info("MM swept stray quote %s on %s (now %s)", oid, tk, left)
-                    if left == "resting":
-                        self.bot.kalshi._req("DELETE", f"/portfolio/orders/{oid}")
+                    log.info("MM swept stray quote %s on %s (cancel verified)", oid, tk)
                 except Exception as e:
                     log.warning("MM sweep cancel failed %s: %s", oid, str(e)[:120])
         except Exception as e:
@@ -360,12 +357,6 @@ class MarketMaker:
             if "not found" not in msg and "404" not in msg and "executed" not in msg:
                 log.info("MM cancel failed %s %s: %s", tk, side, str(e)[:120])
                 return
-        try:  # make sure it's really gone: a "successful" cancel call doesn't always cancel
-            if self.bot.kalshi._req("GET", f'/portfolio/orders/{o["id"]}').get("order", {}).get("status") == "resting":
-                self.bot.kalshi._req("DELETE", f'/portfolio/orders/{o["id"]}')
-                log.info("MM cancel didn't take on %s %s, retried", tk, side)
-        except Exception:
-            pass
         self._poll_one(tk, st, side)  # catch any fill that happened before the cancel
         if st["orders"].get(side) is o:
             st["orders"].pop(side, None)
