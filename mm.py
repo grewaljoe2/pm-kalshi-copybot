@@ -40,6 +40,7 @@ class MarketMaker:
         for rec in self.bot.state.data.get("lots", []) + self.bot.state.data.get("closed", []):
             if rec.get("whale") == "Recovered" and self.covers(rec.get("ticker", "")):
                 rec["whale"] = f'MM · {rec["ticker"][2:].split("15M")[0]} 15m'  # missed MM fills, credit them to MM
+        self._fix_old_pairs()
         inv: dict[str, dict] = {}
         for l in self.bot.state.data.get("lots", []):
             if str(l.get("whale", "")).startswith("MM ") and l.get("count", 0) > 0:
@@ -54,6 +55,22 @@ class MarketMaker:
         for tk, st in self.mk.items():
             if tk not in inv:
                 st["inv"] = {"yes": [0, 0.0], "no": [0, 0.0]}
+
+    def _fix_old_pairs(self) -> None:
+        """Older pair closes booked all the profit on YES and $0 on NO as ordinary sales: relabel them as
+        pairs and split the profit evenly (same total)."""
+        cl = self.bot.state.data.get("closed", [])
+        mm = [c for c in cl if str(c.get("whale", "")).startswith("MM ") and c.get("how") == "sold"]
+        for y in [c for c in mm if c["side"] == "yes"]:
+            for n in mm:
+                if n["side"] == "no" and n["ticker"] == y["ticker"] and n["count"] == y["count"] and \
+                        abs(n.get("closed", 0) - y.get("closed", 0)) < 2 and abs(n["pnl"]) < 0.005 and n.get("how") == "sold":
+                    half = y["pnl"] / 2
+                    y["pnl"], n["pnl"] = round(half, 4), round(half, 4)
+                    y["proceeds"] = round(y["cost"] + half, 4)
+                    n["proceeds"] = round(n["cost"] + half, 4)
+                    y["how"] = n["how"] = "pair"
+                    break
 
     # ---- settings ---------------------------------------------------------------- #
     def coins(self) -> set[str]:

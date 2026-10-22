@@ -184,14 +184,14 @@ class State:
             if pot["cash"] + open_pot > float(pot.get("usd", 0)):
                 pot["cash"] = round(max(0.0, float(pot.get("usd", 0)) - open_pot), 4)
 
-    def sell_lots(self, ticker: str, side: str, count: int, price: float, fee: float) -> None:
+    def sell_lots(self, ticker: str, side: str, count: int, price: float, fee: float, how: str = "sold") -> None:
         """FIFO-close lots when we copy a whale's exit."""
         left, total = count, count
         for lot in [l for l in self.data["lots"] if l["ticker"] == ticker and l["side"] == side]:
             if left <= 0:
                 break
             n = min(left, lot["count"])
-            self._close(lot, n, n * price, fee * n / total, "sold")
+            self._close(lot, n, n * price, fee * n / total, how)
             left -= n
         self.data["lots"] = [l for l in self.data["lots"] if l["count"] > 0]
 
@@ -930,8 +930,9 @@ class CopyBot:
         name = next((l["whale"] for l in lots if l["ticker"] == tk), "Pair")
         self.state.add_position(tk, "yes", -pairs)
         self.state.add_position(tk, "no", -pairs)
-        self.state.sell_lots(tk, "yes", pairs, 1 - an, 0.0)  # pair profit lands on the YES side
-        self.state.sell_lots(tk, "no", pairs, an, 0.0)
+        g = (1 - ay - an) / 2  # pair profit split evenly between the two sides
+        self.state.sell_lots(tk, "yes", pairs, ay + g, 0.0, "pair")
+        self.state.sell_lots(tk, "no", pairs, an + g, 0.0, "pair")
         self._journal(name, {"title": f"pair x{pairs}", "outcome": "pair", "price": 1 - ay - an},
                       Target(tk, "yes"), f"pair done ({100 * (1 - ay - an):+.0f}c each)", pairs, ay + an)
         log.info("PAIR netted %s x%d: YES %.3f + NO %.3f -> %+.1fc each", tk, pairs, ay, an, 100 * (1 - ay - an))

@@ -165,6 +165,13 @@ def trades_with_pnl(n: int = 40) -> list[dict]:
                 for j in same:  # a sale that closed several lots
                     used.add(j)
                 e["pnl"] = round(closed[best]["pnl"] + sum(closed[j]["pnl"] for j in same), 2)
+        elif str(e.get("action", "")).startswith("pair done"):  # YES + NO cancelled out: both sides' profit
+            t0 = ts(e.get("time_utc"))
+            js = [j for j, c in enumerate(closed) if j not in used and c.get("how") == "pair"
+                  and c.get("ticker") == e.get("kalshi_ticker") and abs(c.get("closed", 0) - t0) < 5]
+            used.update(js)
+            if js:
+                e["pnl"] = round(sum(closed[j]["pnl"] for j in js), 2)
         elif str(e.get("action", "")).startswith("buy"):
             held = BOT.state.position(e.get("kalshi_ticker") or "", e.get("side") or "yes")
             e["status"] = "open" if held > 0 else "closed"
