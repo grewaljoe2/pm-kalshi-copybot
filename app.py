@@ -135,6 +135,52 @@ def _mem_watch():
 _register("mem-watch", _mem_watch)
 
 
+def trades_with_pnl(n: int = 40) -> list[dict]:
+    """Copied-trades table with profit/loss: sells and settlements show what they made after fees;
+    buys show 'open' while held, 'closed' once sold or settled."""
+    from datetime import datetime, timezone
+    data = BOT.state.data
+    events = [dict(e) for e in data.get("events", [])[-300:]]
+    closed = data.get("closed", [])[-1500:]
+    used = set()
+
+    def ts(iso):
+        try:
+            return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return 0.0
+    for e in events:
+        if str(e.get("action", "")).startswith("sell"):
+            t0, best = ts(e.get("time_utc")), None
+            for i, c in enumerate(closed):
+                if i in used or c.get("how") != "sold" or c.get("ticker") != e.get("kalshi_ticker") \
+                        or c.get("side") != e.get("side") or abs(c.get("closed", 0) - t0) > 180:
+                    continue
+                best = i if best is None or abs(c["closed"] - t0) < abs(closed[best]["closed"] - t0) else best
+            if best is not None:
+                used.add(best)
+                same = [j for j, c in enumerate(closed) if j not in used and c.get("how") == "sold"
+                        and c.get("ticker") == e.get("kalshi_ticker") and c.get("side") == e.get("side")
+                        and abs(c.get("closed", 0) - closed[best]["closed"]) < 2]
+                for j in same:  # a sale that closed several lots
+                    used.add(j)
+                e["pnl"] = round(closed[best]["pnl"] + sum(closed[j]["pnl"] for j in same), 2)
+        elif str(e.get("action", "")).startswith("buy"):
+            held = BOT.state.position(e.get("kalshi_ticker") or "", e.get("side") or "yes")
+            e["status"] = "open" if held > 0 else "closed"
+    for c in closed:  # settlements aren't in the journal: add them as rows
+        if c.get("how") != "settled" or c.get("closed", 0) < datetime.now(timezone.utc).timestamp() - 7 * 86400:
+            continue
+        won = c.get("result") == c.get("side")
+        events.append({"time_utc": datetime.fromtimestamp(c["closed"], timezone.utc).isoformat(timespec="seconds"),
+                       "whale": c.get("whale"), "kalshi_ticker": c.get("ticker"), "side": c.get("side"),
+                       "action": "settled · " + ("won" if won else ("void" if c.get("result") not in ("yes", "no") else "lost")),
+                       "contracts": c.get("count"), "price": "1.0000" if won else "0.0000",
+                       "pnl": round(c.get("pnl", 0), 2), "mode": "live"})
+    events.sort(key=lambda e: ts(e.get("time_utc")), reverse=True)
+    return events[:n]
+
+
 def _lag_review():
     """Today's closed lag trades: what we made vs holding each one to settlement."""
     import json
@@ -425,7 +471,7 @@ def index():
     st = BOT.status() if BOT else None
     return render_template_string(
         PAGE, st=st, err=BOT_ERROR, logs=list(LOG_LINES)[-80:][::-1],
-        trades=BOT.recent_journal(40) if BOT else [], ago=_ago, slate=SLATE, best=BEST, props=PROPS, combos=(BOT.combo_slate if BOT else {}),
+        trades=trades_with_pnl(40) if BOT else [], ago=_ago, slate=SLATE, best=BEST, props=PROPS, combos=(BOT.combo_slate if BOT else {}),
         now=datetime.now(timezone.utc).strftime("%H:%M:%S UTC"),
     )
 
@@ -550,8 +596,8 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
 {% else %}<div class="k">None</div>{% endif %}</div>
 {% endif %}
 <div class="card"><h2>Copied trades</h2>
-{% if trades %}<div class="scroll"><table><tr><th>Time</th><th>Whale</th><th>Market</th><th>Action</th><th>Qty</th><th>Price</th></tr>
-{% for t in trades %}<tr><td>{{ t.time_utc[5:16] }}</td><td>{{ t.whale }}</td><td>{{ t.kalshi_ticker }} {{ t.side|upper }}</td><td>{{ t.action }}{% if t.mode=='paper' %} (paper){% endif %}</td><td>{{ t.contracts }}</td><td>{{ t.price }}</td></tr>{% endfor %}
+{% if trades %}<div class="scroll"><table><tr><th>Time</th><th>Whale</th><th>Market</th><th>Action</th><th>Qty</th><th>Price</th><th>P&amp;L</th></tr>
+{% for t in trades %}<tr><td>{{ t.time_utc[5:16] }}</td><td>{{ t.whale }}</td><td>{{ t.kalshi_ticker }} {{ t.side|upper }}</td><td>{{ t.action }}{% if t.mode=='paper' %} (paper){% endif %}</td><td>{{ t.contracts }}</td><td>{{ t.price }}</td><td class="{{ 'ok' if (t.pnl or 0) > 0 else ('bad' if (t.pnl or 0) < 0 else '') }}">{% if t.pnl is not none %}<b>{{ '%+.2f'|format(t.pnl) }}</b>{% else %}{{ t.status or '' }}{% endif %}</td></tr>{% endfor %}
 </table></div>{% else %}<div class="k">No copied trades yet.</div>{% endif %}</div>
 <div class="card"><h2>Log</h2><pre>{% for l in logs %}{{ l }}
 {% endfor %}</pre></div>
