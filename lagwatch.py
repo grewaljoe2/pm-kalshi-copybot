@@ -138,6 +138,8 @@ class LagWatch:
                             hit, reason = None, f"error {type(e).__name__}"
                         if not hit:
                             why[str(reason)[:50]] += 1
+                            if "part-game" in str(reason) and len(self.__dict__.setdefault("_pg", [])) < 25:
+                                self._pg.append({"slug": t["slug"], "ev": t["eventSlug"], "title": t["title"], "o": o})
                             if len(self.__dict__.setdefault("_samples", [])) < 5:
                                 self._samples.append({"slug": t["slug"], "eventSlug": t["eventSlug"], "title": t["title"],
                                                       "outcome": o, "reason": str(reason)[:60]})
@@ -151,6 +153,10 @@ class LagWatch:
         log.info("LAGWATCH discovery: %d Polymarket markets scanned, %d in the next 12h, %d matched to Kalshi "
                  "(%d pairs tracked); misses %s; samples %s", scanned, in_window, found, len(pairs),
                  why.most_common(6), json.dumps(getattr(self, "_samples", []))[:900])
+        if getattr(self, "_pg", None):
+            for x in self._pg:
+                log.info("PARTGAME_SAMPLE %s", json.dumps(x))
+            self._pg = []
 
     def _safe_discover(self) -> None:
         try:

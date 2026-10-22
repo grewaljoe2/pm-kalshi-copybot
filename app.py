@@ -119,6 +119,19 @@ def _lag_loop():
 
 _register("lagwatch", _lag_loop)
 
+
+def _series_probe():
+    time.sleep(40)
+    try:
+        j = BOT.kdata._req("GET", "/series", params={"category": "Sports"})
+        names = sorted(x["ticker"] for x in j.get("series", []) if x["ticker"].endswith(("GAME", "MATCH")))
+        log.info("SERIES_PROBE %d: %s", len(names), " ".join(names))
+    except Exception as e:
+        log.info("SERIES_PROBE failed %s", e)
+
+
+_register("series-probe", _series_probe)
+
 # ---- bot thread ------------------------------------------------------------ #
 BOT: copybot.CopyBot | None = None
 BOT_ERROR: str | None = None
