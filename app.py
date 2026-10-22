@@ -271,7 +271,9 @@ def daily_report(day: str | None = None) -> dict:
             "reserve_ready": BOT.reserve_free(), "pot_free": BOT.pot_free(), "pot_in_bets": round(BOT.pot_open(), 2),
             "open_bets": len(data.get("lots", [])),
             "lag_trading_groups": sorted(k for k, v in (lw.get("groups") or {}).items() if v.get("mode") == "trade"),
-            "lag_size_pct": 100 * float(lag_levels[min(int(lw.get("size_level", 0)), len(lag_levels) - 1)])}
+            "lag_size_pct": 100 * float(lag_levels[min(int(lw.get("size_level", 0)), len(lag_levels) - 1)]),
+            "lag_compare": {k: round(sum(r.get(k, 0) for r in (lw.get("shadow_done") or []) if r.get("day") == day), 2)
+                            for k in ("flip", "hold", "stop_loss", "lock_2min")}}
 
 
 def _daily_report_loop():

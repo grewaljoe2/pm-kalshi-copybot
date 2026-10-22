@@ -255,6 +255,7 @@ class CryptoLag:
             fy = self.fair_yes(m)
             if fy is None:
                 continue
+            self.lw.paper_stop(tk, fy, q["yes_bid"], q["yes_ask"], m["close"] - now)  # test only, no orders
             if m["close"] - now <= exit_s:  # last minutes: get out of trades that are going wrong
                 self.lw.exit_late(tk, fy, q["yes_bid"], q["yes_ask"], rate, float(self.cfg.get("exit_below", 0.40)))
             if m["close"] - now < 45:

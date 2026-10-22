@@ -587,6 +587,17 @@ class LagWatch:
                    "max_bid": sold, "bid_late": None})
         del sh[:-300]
 
+    def paper_stop(self, ticker: str, fair_yes: float, yes_bid: float, yes_ask: float, secs_left: float) -> None:
+        """Paper only: with 5+ min left, if a trade's model value falls to half its entry and someone pays
+        75%+ of that value, note the price an early stop-loss would have sold at."""
+        for x in self.stats.get("trades", []):
+            if x["ticker"] != ticker or x.get("stop_px") is not None or secs_left < 300:
+                continue
+            fair = fair_yes if x["side"] == "yes" else 1 - fair_yes
+            bid = yes_bid if x["side"] == "yes" else 1 - yes_ask
+            if fair <= 0.5 * x["entry"] and bid >= 0.75 * fair:
+                x["stop_px"] = round(bid, 4)
+
     def shadow_bid(self, key: str, bid: float, now: float) -> None:
         for s in self.stats.get("shadow", []):  # what a sold trade would have been worth if kept
             if s["key"] == key:
@@ -618,9 +629,11 @@ class LagWatch:
             late = s.get("bid_late")
             lock = n * self._net(e, late, rate) if late is not None else hold
             best = n * self._net(e, s.get("max_bid", s["sold"]), rate)
+            stop = n * self._net(e, s["stop_px"], rate) if s.get("stop_px") is not None else hold
             rec = {"held": bool(s.get("held")), "ticker": s["ticker"], "side": s["side"], "group": s.get("group"), "n": n, "entry": e,
                    "sold": s["sold"], "result": res, "flip": round(flip, 2), "hold": round(hold, 2),
-                   "lock_2min": round(lock, 2), "best_possible": round(best, 2), "day": time.strftime("%Y-%m-%d")}
+                   "lock_2min": round(lock, 2), "best_possible": round(best, 2), "stop_loss": round(stop, 2),
+                   "stop_hit": s.get("stop_px") is not None, "day": time.strftime("%Y-%m-%d")}
             done.append(rec)
             log.info("LAG_SHADOW %s", json.dumps(rec))
         del done[:-1000]
@@ -640,7 +653,7 @@ class LagWatch:
                 sh.append({"key": x["key"], "ticker": x["ticker"], "side": x["side"], "group": x.get("group"),
                            "entry": x["entry"], "sold": x.get("flip_px") or x["entry"], "count": x["count"],
                            "close": x["close"], "t_sell": None, "max_bid": x.get("flip_px") or x["entry"],
-                           "bid_late": None, "held": True})
+                           "bid_late": None, "held": True, "stop_px": x.get("stop_px")})
             self.stats["trades"] = [x for x in self.stats["trades"] if not done(x)]
 
     def _record(self, g: dict) -> None:
