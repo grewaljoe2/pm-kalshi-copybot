@@ -1067,8 +1067,23 @@ class CopyBot:
             return self.balance
         return self.equity() - self.open_cost()
 
+    def reserve_usd(self) -> float:
+        """Fixed $ reserve (your extra deposit): only strong whale trades and lag trades may use it.
+        Ordinary copies and parlays always leave this much cash untouched."""
+        return max(0.0, float(self.bank.get("reserve_usd", 0) or 0))
+
+    def reserve_free(self) -> float:
+        return round(min(self.reserve_usd(), max(0.0, self.cash())), 2)
+
+    def sizing_equity(self) -> float:
+        """Balance used to size ordinary bets: the reserve doesn't make normal bets bigger."""
+        return self.equity() - self.reserve_free()
+
     def lag_reserve(self) -> float:
-        """Cash kept free for live lag trades (only once lag trading is switched on)."""
+        """Cash kept free for live lag trades (only once lag trading is switched on).
+        With a fixed reserve set, lag trades use that shared reserve instead."""
+        if self.reserve_usd() > 0:
+            return 0.0
         lw = self.state.data.get("lagwatch") or {}
         lc = self.cfg.get("lag_watch", {}) or {}
         if lw.get("mode") != "trade" or not lc.get("enabled", True):
@@ -1092,12 +1107,19 @@ class CopyBot:
             if str(l.get("whale", "")).startswith("Lag trade") and l.get("count", 0) > 0:
                 out["open"] += 1
                 out["open_cost"] = round(out["open_cost"] + l["cost"], 2)
-        out["reserve_free"] = round(min(self.lag_reserve(), max(0.0, self.cash())), 2)
+        out["reserve_free"] = (self.reserve_free() if self.reserve_usd() > 0
+                               else round(min(self.lag_reserve(), max(0.0, self.cash())), 2))
         return out
 
-    def spendable_cash(self) -> float:
-        """Free cash for whale copies, board picks and parlays (the lag reserve is set aside)."""
-        return self.cash() - self.lag_reserve()
+    def spendable_cash(self, strong: bool = False) -> float:
+        """Free cash for whale copies, board picks and parlays (the lag reserve is set aside).
+        Ordinary bets also leave the fixed reserve alone; strong trades may use it."""
+        return self.cash() - self.lag_reserve() - (0.0 if strong else self.reserve_usd())
+
+    def is_strong(self, score: float, same: int = 0) -> bool:
+        """Strong trade (may use the reserve): high score, or 3+ whales on the same side."""
+        rc = self.bank.get("reserve", {}) or {}
+        return score >= float(rc.get("min_score", 80)) or same + 1 >= int(rc.get("min_whales", 3))
 
     def current_stage(self) -> dict:
         """Growth plan: bet heavier while the account is small, taper as it grows.
@@ -1351,7 +1373,8 @@ class CopyBot:
         # sizing
         held_usd = self.state.position(tgt.ticker, tgt.side) * ask
         if r["sizing"] == "score":
-            budget, why = self._bankroll_budget(sc["score"], sc["ev"], held_usd)
+            budget, why = self._bankroll_budget(sc["score"], sc["ev"], held_usd,
+                                                self.is_strong(sc["score"], same))
             if why:
                 return self._skip(t, name, why)
             budget *= size_mult
@@ -1412,7 +1435,7 @@ class CopyBot:
         sc = score_bet(whale_px=fair_px, ask=price, whale_usd=whale_usd, stats=stats,
                        same=same, opposite=opp, rate=rate)
         held_usd = self.state.position(tgt.ticker, tgt.side) * price
-        budget, why = self._bankroll_budget(sc["score"], sc["ev"], held_usd)
+        budget, why = self._bankroll_budget(sc["score"], sc["ev"], held_usd, self.is_strong(sc["score"], same))
         if why:
             return self._skip(t, name, f"limit: {why}")
         count = math.floor(budget / price)
@@ -1501,7 +1524,8 @@ class CopyBot:
         self.state.data["resting"] = [x for x in self.state.data.get("resting", [])
                                       if not (x["ticker"] == ticker and x["side"] == side)]
 
-    def _bankroll_budget(self, score: float, ev: float, held_usd: float) -> tuple[float, str | None]:
+    def _bankroll_budget(self, score: float, ev: float, held_usd: float,
+                         strong: bool = False) -> tuple[float, str | None]:
         """$ to stake from the bankroll for a bet with this score, or (0, reason to skip)."""
         from scoring import stake_pct
         b = self.bank
@@ -1513,10 +1537,15 @@ class CopyBot:
         eq = self.equity()
         if eq <= self.day_start_equity() * (1 - b.get("daily_stop_pct", 0.15)):
             return 0.0, "daily loss stop reached"
-        budget = eq * pct
-        budget = min(budget, eq * self.current_stage().get("max_game_pct", b.get("max_game_pct", 0.08)) - held_usd)
+        strong = strong or self.is_strong(score)
+        seq = self.sizing_equity()
+        budget = seq * pct
+        budget = min(budget, seq * self.current_stage().get("max_game_pct", b.get("max_game_pct", 0.08)) - held_usd)
         budget = min(budget, eq * self.current_stage().get("max_open_pct", b.get("max_open_pct", 0.7)) - self.open_cost())
-        budget = min(budget, self.spendable_cash())
+        free = self.spendable_cash(strong)
+        if strong and self.reserve_usd() > 0 and self.spendable_cash() < budget <= free:
+            log.info("  using the reserve for a strong trade (score %.0f)", score)
+        budget = min(budget, free)
         if budget < b.get("min_stake_usd", 2.0):
             return 0.0, "bankroll limits leave no room"
         return budget, None
@@ -1579,7 +1608,7 @@ class CopyBot:
                 continue  # only bet games confirmed not to have started
             log.info("[Board] %s %s -> %s %s  score %d EV %+.1f%%  (%d traders: %s)", p["title"], p["outcome"],
                      p["ticker"], p["side"].upper(), p["score"], 100 * p["ev"], p["whales"], ", ".join(p["names"]))
-            budget, why = self._bankroll_budget(p["score"], p["ev"], 0.0)
+            budget, why = self._bankroll_budget(p["score"], p["ev"], 0.0, strong=True)  # 3+ whales agree
             if why:
                 self._skip(t, name, why)
                 continue
@@ -2099,7 +2128,7 @@ class CopyBot:
         """Half-Kelly on the edge, capped per combo and by what's left of today's combo budget."""
         if price <= 0 or price >= 1 or hit <= price:
             return 0.0
-        eq = self.equity()
+        eq = self.sizing_equity()
         kelly = (hit - price) / (1 - price)
         stake = eq * kelly * float(cc.get("kelly_fraction", 0.5))
         stake = min(stake, eq * float(cc.get("max_combo_pct", 0.10)))
@@ -2238,6 +2267,8 @@ class CopyBot:
             "equity": round(self.equity(), 2),
             "cash": round(self.cash(), 2),
             "lag_reserve": round(self.lag_reserve(), 2),
+            "reserve_usd": self.reserve_usd(),
+            "reserve_free": self.reserve_free(),
             "start_usd": float(self.bank.get("start_usd", 100)),
             "stage": self.current_stage().get("name"),
             "lagwatch": self.state.data.get("lagwatch") or {},

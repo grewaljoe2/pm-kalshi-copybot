@@ -168,6 +168,10 @@ combos:
 # Bankroll mode (sizing: score). Paper mode tracks a virtual bankroll starting here.
 bankroll:
   start_usd: 98.49          # live: your deposit (used for the Return %)
+  reserve_usd: 0            # extra deposit kept for strong whale trades + lag trades (shared, first come first served)
+  reserve:
+    min_score: 80           # strong trade = score 80+ ...
+    min_whales: 3           #   ... or 3+ whales on the same side (Best-bets picks always count)
   # Growth plan: heavy while small, taper as the account grows. [min score, % of balance per bet]
   stages:
     - name: "1 growth"

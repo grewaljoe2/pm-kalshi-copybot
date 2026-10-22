@@ -294,7 +294,7 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
 </div>
 {% if st %}<div class="card"><h2>${{ '%.0f'|format(st.start_usd) }} bankroll ({{ 'paper' if st.mode != 'live' else 'live' }})</h2>
 <div class="grid"><div><div class="k">Balance</div><div class="v {{ 'ok' if st.equity > st.start_usd else ('bad' if st.equity < st.start_usd else '') }}">${{ '%.2f'|format(st.equity) }}</div></div>
-<div><div class="k">Free cash</div><div class="v">${{ '%.2f'|format(st.cash) }}</div></div>
+<div><div class="k">Free cash</div><div class="v">${{ '%.2f'|format(st.cash) }}</div>{% if st.reserve_usd %}<div class="k">reserve ${{ '%.2f'|format(st.reserve_free) }} of ${{ '%.0f'|format(st.reserve_usd) }} ready</div>{% endif %}</div>
 <div><div class="k">Return</div><div class="v">{{ '%+.1f'|format(100 * (st.equity / st.start_usd - 1)) }}%</div></div>
 <div><div class="k">Open bets</div><div class="v">{{ st.open_lots }}</div></div></div>
 <div class="k" style="margin-top:8px">Stage: <b>{{ st.stage }}</b> · bet size {% for t in st.stage_tiers %}{{ t[0] }}+ → {{ '%g'|format(100*t[1]) }}%{% if not loop.last %}, {% endif %}{% endfor %} · peak ${{ '%.2f'|format(st.peak or st.start_usd) }}</div></div>{% endif %}
