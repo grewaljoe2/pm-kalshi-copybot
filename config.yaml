@@ -46,6 +46,18 @@ whales:
     address: "0x27f738fe203827445690339104aae35b20bc44b0"
     min_trade_usd: 25         # typical bet ~$420
 
+# The bot manages the whale list: benches whales that lose us money, adds strong screener traders.
+whale_manager:
+  enabled: true
+  bench_min_copies: 20      # judge a whale only after 20 settled copies
+  bench_roi: -0.10          # bench at -10% ROI or worse (still follows their exits)
+  auto_add: true
+  max_auto: 6               # at most 6 auto-added whales
+  min_score: 85             # screener score
+  max_per_day: 60           # skip bots that trade constantly
+  min_median_usd: 100       # real bet sizes
+  min_copyable_pct: 80      # most of their bets exist on Kalshi
+
 # Copy whales' bets that were already open before the bot saw them (pre-game only)
 catch_up:
   enabled: true

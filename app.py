@@ -337,6 +337,9 @@ table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;p
 <div class="k" style="margin-top:8px">{% for l,n in slate.by_league[:12] %}{{ l }} {{ n }}{% if not loop.last %} · {% endif %}{% endfor %}</div>
 {% if slate.skip_reasons %}<div class="k" style="margin-top:6px">Top skip reasons: {% for r,n in slate.skip_reasons[:4] %}{{ r }} ({{ n }}){% if not loop.last %}; {% endif %}{% endfor %}</div>{% endif %}
 {% else %}<div class="k">Counting today's games (about a minute after a restart)…</div>{% endif %}</div>
+<div class="card"><h2>Whales followed</h2>
+{% if st and st.whales %}<div>{% for w in st.whales %}<span class="pill {{ 'bad' if w.benched else ('ok' if w.auto else '') }}" style="margin:2px 4px 2px 0">{{ w.name }}{% if w.auto %} · auto{% endif %}{% if w.benched %} · benched{% endif %}</span>{% endfor %}</div>
+<div class="k" style="margin-top:6px">Auto = added by the bot from the screener (strong, profitable, copyable traders). Benched = 20+ settled copies with ROI −10% or worse: new bets aren't copied (exits still are); un-benched if ROI turns positive.</div>{% endif %}</div>
 <div class="card"><h2>Whale scoreboard (your copied results)</h2>
 {% if st.scoreboard %}<div class="scroll"><table><tr><th>Whale</th><th>Settled</th><th>Win %</th><th>P&amp;L</th><th>ROI</th><th>Open</th></tr>
 {% for b in st.scoreboard %}<tr><td>{{ b.whale }}</td><td>{{ b.closed }}</td><td>{{ b.win_rate if b.win_rate is not none else '—' }}{% if b.win_rate is not none %}%{% endif %}</td>
@@ -409,6 +412,10 @@ def _report_loop():
                 BOT.state.data["whale_stats"] = BOT.whale_stats
                 BOT.screen_buys = [b for r in good[:30] for b in r.get("_buys", [])]
                 log.info("Screener fed %d whale records and %d recent buys", len(stats), len(BOT.screen_buys))
+                try:
+                    BOT.manage_whales(res)
+                except Exception as e:
+                    log.warning("whale manager failed: %s", e)
                 try:
                     bets = compute_best()
                     BEST.update(bets=bets, updated=time.time())

@@ -834,6 +834,8 @@ class CopyBot:
             log.warning("Paper bets found in the live ledger: archived, starting clean")
         if self.mode == "live":
             self.state.data["migr_paper_v1"] = True
+        for w in self.state.data.get("auto_whales", []):  # whales the bot added itself (screener)
+            self.whales.setdefault(w["address"].lower(), w)
         self.whale_stats: dict = self.state.data.get("whale_stats", {})  # wallet -> screener stats
         self.screen_buys: list = []  # recent buys of other top whales (from the screener)
         self.bank = cfg.get("bankroll", {}) or {}
@@ -1087,6 +1089,65 @@ class CopyBot:
         return d[_today()]
 
     # ---- copy logic ------------------------------------------------------ #
+    # ---- whale list: bench losers, add strong screener traders ------------- #
+    def manage_whales(self, screened: list[dict]) -> None:
+        wc = self.cfg.get("whale_manager", {}) or {}
+        if not wc.get("enabled", True):
+            return
+        benched = self.state.data.setdefault("benched_whales", {})
+        # 1) our own copied results per whale (live + pre-game copies together)
+        agg: dict[str, dict] = {}
+        for b in self.state.scoreboard():
+            n = b["whale"].split(" · ")[0]
+            if n.startswith(("Combo", "Lag trade", "Board picks")):
+                continue
+            a = agg.setdefault(n, {"closed": 0, "pnl": 0.0, "staked": 0.0})
+            a["closed"] += b["closed"]
+            a["pnl"] += b["pnl"]
+            a["staked"] += b["staked"]
+        for n, a in agg.items():
+            roi = a["pnl"] / a["staked"] if a["staked"] else 0
+            if n not in benched and a["closed"] >= int(wc.get("bench_min_copies", 20)) and roi <= float(wc.get("bench_roi", -0.10)):
+                benched[n] = {"since": int(time.time()), "copies": a["closed"], "roi": round(100 * roi, 1)}
+                log.warning("WHALES benched %s: %d settled copies, ROI %.1f%%", n, a["closed"], 100 * roi)
+            elif n in benched and roi > 0:
+                benched.pop(n, None)
+                log.info("WHALES un-benched %s: ROI back to %.1f%%", n, 100 * roi)
+        # 2) add strong, copyable traders from the screener
+        if not wc.get("auto_add", True) or not screened:
+            return
+        auto = self.state.data.setdefault("auto_whales", [])
+        auto[:] = [w for w in auto if w["name"] not in benched]
+        have = set(self.whales)
+        for r in sorted(screened, key=lambda r: -(r.get("score") or 0)):
+            if len(auto) >= int(wc.get("max_auto", 6)):
+                break
+            w = (r.get("wallet") or "").lower()
+            if not w or w in have:
+                continue
+            ok = ((r.get("score") or 0) >= float(wc.get("min_score", 85))
+                  and (r.get("pnl_month") or 0) > 0 and (r.get("pnl_all") or 0) > 0
+                  and 2 <= (r.get("per_day") or 0) <= float(wc.get("max_per_day", 60))
+                  and (r.get("median_usd") or 0) >= float(wc.get("min_median_usd", 100))
+                  and (r.get("copyable_pct") or 0) >= float(wc.get("min_copyable_pct", 80))
+                  and (r.get("extreme_price_pct") or 100) <= 15
+                  and (r.get("last_trade_h") or 999) <= 48)
+            if not ok:
+                continue
+            name = re.sub(r"[^A-Za-z0-9_-]", "", str(r.get("name") or w[:10]))[:20] or w[:10]
+            if name in benched:
+                continue
+            entry = {"name": name, "address": w, "auto": True, "added": int(time.time()),
+                     "min_trade_usd": max(25, int(0.25 * (r.get("median_usd") or 100)))}
+            auto.append(entry)
+            self.whales[w] = entry
+            have.add(w)
+            log.warning("WHALES added %s (screener score %.0f, month +$%.0f, %.1f bets/day, typical $%.0f)",
+                        name, r.get("score") or 0, r.get("pnl_month") or 0, r.get("per_day") or 0, r.get("median_usd") or 0)
+        # drop auto whales benched since
+        for w in [a for a, x in self.whales.items() if x.get("auto") and x["name"] in benched]:
+            self.whales.pop(w, None)
+
     def handle_trade(self, addr: str, whale: dict, t: dict) -> None:
         name = whale.get("name", addr[:8])
         side = str(t.get("side", "")).upper()
@@ -1199,6 +1260,9 @@ class CopyBot:
 
     def _copy_buy(self, name, whale, t, tgt: Target, whale_px, whale_usd) -> None:
         r = self.risk
+        base = name.split(" · ")[0]
+        if base in (self.state.data.get("benched_whales") or {}):
+            return self._skip(t, name, "whale benched (losing copy record)")
         m = self.kdata.market(tgt.ticker)
         if m.get("status") not in (None, "open", "active"):
             return self._skip(t, name, f"Kalshi market {m.get('status')}")
@@ -2090,7 +2154,10 @@ class CopyBot:
             "mode": self.mode,
             "kalshi_env": self.kalshi_env,
             "paused": self.paused,
-            "whales": [{"name": w.get("name"), "address": a} for a, w in self.whales.items()],
+            "whales": [{"name": w.get("name"), "address": a, "auto": bool(w.get("auto")),
+                        "benched": w.get("name") in (self.state.data.get("benched_whales") or {})}
+                       for a, w in self.whales.items()],
+            "benched": self.state.data.get("benched_whales") or {},
             "mapped_markets": len(self.maps),
             "positions": {k: v for k, v in self.state.data["positions"].items() if v},
             "spent_today": self.state.spent_today(),

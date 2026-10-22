@@ -87,6 +87,8 @@ class PropModel:
         self._logs: dict[tuple, tuple[float, list]] = {}
         self._starts: dict[str, float | None] = {}
         self.skips: dict[str, int] = {}
+        self._homes: dict[str, set] = {}
+        self._inj: dict[tuple, tuple] = {}
 
     def _k(self, path: str, **params) -> dict:
         """Kalshi public GET with backoff on 429 (rate limit)."""
@@ -165,6 +167,8 @@ class PropModel:
                             continue
                         meta = evmeta.get(eid) or {}
                         rows[eid] = {"eid": eid, "date": meta.get("gameDate") or "",
+                                     "home": str(meta.get("atVs") or "").strip() != "@",
+                                     "opp": ((meta.get("opponent") or {}).get("abbreviation") or "").upper(),
                                      "stats": dict(zip(names, ev.get("stats") or []))}
         out = sorted(rows.values(), key=lambda r: r["date"], reverse=True)
         self._logs[key] = (time.time(), out)
@@ -181,19 +185,61 @@ class PropModel:
             tot += v
         return tot
 
-    def hit_rate(self, league: str, rows: list[dict], fields: list[str], line: float) -> dict | None:
-        pairs = [(r.get("eid"), self.stat_value(r, fields)) for r in rows[:SAMPLE[league]]]
-        pairs = [(e, v) for e, v in pairs if v is not None]
+    def injury_status(self, league: str, aid: str) -> str:
+        """ESPN's current injury status for the player ('' = healthy / unknown). Cached 1h."""
+        key = (league, aid)
+        hit = self._inj.get(key)
+        if hit and time.time() - hit[0] < 3600:
+            return hit[1]
+        status = ""
+        try:
+            j = self._espn(f"/common/v3/sports/{SPORT[league]}/athletes/{aid}")
+            a = j.get("athlete") or j
+            inj = a.get("injuries") or []
+            if inj:
+                status = str((inj[0] or {}).get("status") or (inj[0].get("type") or {}).get("description") or "")
+            if not status:
+                st = a.get("status") or {}
+                status = str(st.get("type") if isinstance(st.get("type"), str) else st.get("name") or "")
+                if status.lower() == "active":
+                    status = ""
+        except Exception as e:
+            log.debug("espn injury %s: %s", aid, e)
+        self._inj[key] = (time.time(), status.lower())
+        return status.lower()
+
+    def hit_rate(self, league: str, rows: list[dict], fields: list[str], line: float,
+                 home: bool | None = None) -> dict | None:
+        """Weighted hit rate over recent games, adjusted for:
+        - role/minutes (NBA): each past game scaled to the minutes he plays now (median of last 5),
+          so a new starter isn't judged on bench games and vice versa (50/50 with the raw rate)
+        - venue: games at the same venue as tonight (home/away) count a bit more."""
+        rows = rows[:SAMPLE[league]]
+        pairs = [(r, self.stat_value(r, fields)) for r in rows]
+        pairs = [(r, v) for r, v in pairs if v is not None]
         vals = [v for _, v in pairs]
         if len(vals) < 6:
             return None
-        w = [DECAY ** i for i in range(len(vals))]
-        hits = sum(wi for wi, v in zip(w, vals) if v > line)
-        p = (hits + 1) / (sum(w) + 2)  # weighted, smoothed hit rate
+        w = []
+        for i, (r, _) in enumerate(pairs):
+            wi = DECAY ** i
+            if home is not None and r.get("home") is not None:
+                wi *= 1.2 if r["home"] == home else 0.85
+            w.append(wi)
+        raw = (sum(wi for wi, v in zip(w, vals) if v > line) + 1) / (sum(w) + 2)
+        p = raw
+        mins = [_num(r["stats"].get("minutes")) for r, _ in pairs] if league == "nba" else []
+        recent_m = sorted(m for m in mins[:5] if m)
+        if len(recent_m) >= 3:
+            exp_m = recent_m[len(recent_m) // 2]
+            adj = [v * clamp(exp_m / m, 0.6, 1.7) if m else v for v, m in zip(vals, mins)]
+            adj_rate = (sum(wi for wi, v in zip(w, adj) if v > line) + 1) / (sum(w) + 2)
+            p = 0.5 * raw + 0.5 * adj_rate
         last10 = vals[:10]
         return {"p_hist": p, "n": len(vals), "avg": sum(last10) / len(last10),
                 "last10_hits": sum(1 for v in last10 if v > line), "last10_n": len(last10),
-                "recent": vals[:5], "hist": [[e, 1 if v > line else 0] for e, v in pairs]}
+                "recent": vals[:5], "hist": [[r.get("eid"), 1 if v > line else 0] for r, v in pairs],
+                "p_raw": raw}
 
     # ESPN abbreviations that differ from Kalshi's
     ALIAS = {"GS": "GSW", "NY": "NYK", "SA": "SAS", "NO": "NOP", "UTAH": "UTA", "WSH": "WAS",
@@ -217,6 +263,7 @@ class PropModel:
                     for y in {h, self.ALIAS.get(h, h)}:
                         out[x + y] = ts
                         out[y + x] = ts
+                        self._homes[x + y] = self._homes[y + x] = {h, self.ALIAS.get(h, h)}
         except Exception as e:
             log.debug("espn scoreboard %s %s: %s", league, ymd, e)
             return {}
@@ -246,6 +293,17 @@ class PropModel:
             return None  # don't cache failures
         self._starts[suffix] = st
         return st
+
+    def _is_home(self, m: dict) -> bool | None:
+        """Is this player's team at home tonight? Ticker: KXNBAPTS-26OCT21MILWAS-WASKGEORGE18-25."""
+        parts = (m.get("ticker") or "").split("-")
+        if len(parts) < 3:
+            return None
+        mm = re.match(r"\d{2}[A-Z]{3}\d{2}([A-Z]+)$", parts[1])
+        homes = self._homes.get(mm.group(1)) if mm else None
+        if not homes:
+            return None
+        return any(parts[2].startswith(h) for h in homes if h)
 
     # ---- scan ------------------------------------------------------------- #
     def _markets(self, series: str) -> list[dict]:
@@ -303,12 +361,20 @@ class PropModel:
                 if (now - last) / 86400 > MAX_IDLE_DAYS[league]:
                     self._skip("not played lately")
                     continue  # hasn't played lately (injury, benched, offseason)
-                hr = self.hit_rate(league, rows, fields, float(line))
+                inj = self.injury_status(league, aid)
+                if any(w in inj for w in ("out", "doubtful", "suspen", "reserve", "questionable")):
+                    self._skip("injury report: " + inj.split()[0])
+                    continue
+                home = self._is_home(m)
+                hr = self.hit_rate(league, rows, fields, float(line), home=home)
                 if not hr:
                     self._skip("too few games")
                     continue
                 mid = (ask + bid) / 2 if bid and ask - bid <= 0.12 else None
-                p = (1 - MARKET_WEIGHT) * hr["p_hist"] + MARKET_WEIGHT * (mid if mid is not None else ask)
+                p_hist = hr["p_hist"]
+                if "day" in inj:  # day-to-day: could be limited, so trust the history less
+                    p_hist = 0.5 + 0.7 * (p_hist - 0.5)
+                p = (1 - MARKET_WEIGHT) * p_hist + MARKET_WEIGHT * (mid if mid is not None else ask)
                 if p < min_p:
                     self._skip("hit chance below min")
                     continue
@@ -325,6 +391,7 @@ class PropModel:
                     "whale_px": round(p, 3), "ev": round(ev, 4), "edge": round(edge, 3), "score": score,
                     "n": hr["n"], "avg": round(hr["avg"], 1), "last10": f'{hr["last10_hits"]}/{hr["last10_n"]}',
                     "recent": hr["recent"], "hist": hr["hist"], "start": start, "status": "pre",
+                    "home": home, "injury": inj or None,
                 })
                 time.sleep(0.05)
         # one line per player+stat: keep the best-rated line
