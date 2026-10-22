@@ -448,7 +448,8 @@ class LagWatch:
             return
         open_cost = sum(x["count"] * x["entry"] for x in self.stats["trades"])
         stake = min(eq * pct, eq * max_open - open_cost,
-                    bot.cash() - bot.pot_cash() - 0.5)  # main + reserve, never the future pot
+                    bot.cash() - (0.0 if self.cfg.get("borrow_pot", True) else bot.pot_cash()) - 0.5)
+        # lag trades may borrow the future pot's idle cash: it comes back within 15 minutes
         n = int(stake // ask) if stake > 0 else 0
         if n < 1:
             return
