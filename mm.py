@@ -186,6 +186,34 @@ class MarketMaker:
         log.warning("MM STRAY FILL %s %s x%d @ %.2f (order %s not tracked) -> booked, exits will manage it",
                     tk, held.upper(), n, px, oid)
 
+    def feed(self, tk, m, fy, q, now) -> None:
+        """Latest prices for a market from the crypto loop; a per-coin worker thread does the trading."""
+        import threading
+        coin = m["prod"].split("-")[0]
+        self.__dict__.setdefault("_latest", {})[tk] = (m, fy, dict(q), now)
+        workers = self.__dict__.setdefault("_workers", {})
+        if coin in workers and workers[coin].is_alive():
+            return
+        def run():
+            while True:
+                try:
+                    for t, (mm_, f, qq, ts) in list(self._latest.items()):
+                        if mm_["prod"].split("-")[0] != coin:
+                            continue
+                        if time.time() > mm_["close"] + 5:
+                            self._latest.pop(t, None)
+                            continue
+                        if time.time() - ts > 3:
+                            continue  # stale prices: wait for fresh ones
+                        self.step(t, mm_, f, qq, time.time())
+                except Exception as e:
+                    log.warning("mm %s worker step failed: %s", coin, str(e)[:120])
+                time.sleep(0.25)
+        th = threading.Thread(target=run, name=f"mm-{coin}", daemon=True)
+        workers[coin] = th
+        th.start()
+        log.info("MM worker thread started for %s", coin)
+
     def _start_bg(self) -> None:
         """Slow Kalshi housekeeping (stray-quote sweep, position check, Kalshi P&L) runs in its own thread,
         so the trading loop (stops, take-profits, pairs) never waits on it."""

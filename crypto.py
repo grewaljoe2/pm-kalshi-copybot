@@ -262,10 +262,7 @@ class CryptoLag:
             if fy is None:
                 continue
             if self.mm.covers(tk):  # market-maker coins: quotes only, no lag trades (they'd net against each other)
-                try:
-                    self.mm.step(tk, m, fy, q, now)
-                except Exception as e:
-                    log.warning("mm step failed %s: %s", tk, e)
+                self.mm.feed(tk, m, fy, q, now)  # each coin trades in its own thread; this loop never waits on it
                 continue
             self.lw.paper_stop(tk, fy, q["yes_bid"], q["yes_ask"], m["close"] - now)  # test only, no orders
             self.lw.poll_pending(tk, fy, now)
