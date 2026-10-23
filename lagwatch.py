@@ -609,6 +609,8 @@ class LagWatch:
                     eo = None
             except Exception as e:
                 log.info("LAGTRADE exit poll %s: %s", eo.get("id"), str(e)[:100])
+        if now < x.get("exit_wait", 0):
+            return False
         lo = x["entry"] + float(self.cfg.get("flip_min", 0.02))
         target = round(max(lo, round(fair - 0.01, 2)), 2)
         if target <= bid or target >= 0.99:
@@ -630,6 +632,7 @@ class LagWatch:
                 log.info("LAGTRADE EXIT POSTED %d %s %s @ %.2f (bought %.2f, model %.2f)", x["count"], x["ticker"],
                          x["side"].upper(), target, x["entry"], fair)
         except Exception as e:
+            x["exit_wait"] = now + 60  # don't retry every tick (e.g. Kalshi wants cash to rest a sell)
             log.info("LAGTRADE exit post failed %s: %s", x["ticker"], str(e)[:120])
         return False
 

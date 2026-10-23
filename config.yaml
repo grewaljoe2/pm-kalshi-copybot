@@ -120,7 +120,7 @@ lag_watch:
   stop_reset: "2026-10-22 18:56"  # lag daily stop counts from this reset (change to reset again)
   maker_entry: true         # crypto lag entries rest one tick under the ask (no fee) instead of buying the ask
   maker_wait_s: 30          # cancel an unfilled maker entry after 30s (or once the gap closes)
-  flip_exit: true           # convergence flip: rest a sell just under model value (maker, no fee) as soon as a lag trade fills
+  flip_exit: false          # convergence flip: rest a sell just under model value (maker, no fee) as soon as a lag trade fills
   flip_min: 0.02            # the resting exit is never below entry + 2c
   stop_c: 0.10              # cut a lag trade once its model value is 10c under cost
   late_cut_s: 300           # last 5 min: close a losing lag trade if the loss is <= 10c, instead of riding it to settlement
