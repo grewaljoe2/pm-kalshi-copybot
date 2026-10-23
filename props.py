@@ -407,6 +407,7 @@ class PropModel:
             if k not in safe or pk["p"] > safe[k]["p"]:
                 safe[k] = pk
         self.safe = sorted(safe.values(), key=lambda x: -x["p"])
+        self.all_lines = list(picks)  # every rated line (lottery picks the biggest line that still clears its floor)
         log.info("props: %d candidate props (%d after one-per-player); skipped %s", len(picks), len(out),
                  sorted(self.skips.items(), key=lambda kv: -kv[1]))
         return out

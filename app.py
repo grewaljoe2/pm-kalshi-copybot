@@ -446,7 +446,7 @@ def _props_loop():
                 picks = model.scan()
                 PROPS.update(picks=picks, updated=time.time(), error=None)
                 BOT.prop_picks = [x for x in picks if x["ask"] <= 0.93]  # regular picks/parlays: unchanged range
-                BOT.lottery_legs = list(getattr(model, "safe", []) or [])
+                BOT.lottery_legs = list(getattr(model, "all_lines", None) or getattr(model, "safe", []) or [])
                 BOT.prop_picks_new = True
                 log.info("PROPS top %s", json.dumps([{k: p[k] for k in (
                     "outcome", "ask", "p", "p_hist", "last10", "avg", "score")} for p in picks[:10]]))

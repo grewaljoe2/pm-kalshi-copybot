@@ -2507,6 +2507,20 @@ class CopyBot:
                          "ask": ask, "score": p.get("score", 0), "game": ev.split("-", 1)[1] if "-" in ev else ev,
                          "start": p.get("start"), "player": p.get("player"), "hist": p.get("hist"),
                          "p_hist": p.get("p_hist"), "title": p["outcome"]})
+        if lane.get("big_lines", False):  # per player+stat keep the BIGGEST line that clears the floor (cheapest)
+            best = {}
+            for l in legs:
+                k = (l["event_ticker"], l.get("player"), l["title"].split("+ ")[-1] if "+ " in l["title"] else l["title"])
+                if k not in best or l["ask"] < best[k]["ask"]:
+                    best[k] = l
+            legs = list(best.values())
+        else:
+            best = {}
+            for l in legs:
+                k = (l["event_ticker"], l.get("player"), l["title"].split("+ ")[-1] if "+ " in l["title"] else l["title"])
+                if k not in best or l["fair"] > best[k]["fair"]:
+                    best[k] = l
+            legs = list(best.values())
         return sorted(legs, key=lambda l: (-l["fair"], -l["score"]))
 
     def lottery_tickets(self) -> None:
