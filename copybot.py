@@ -1571,6 +1571,8 @@ class CopyBot:
             slip = lv.get("max_slippage", 0.0)
             size_mult = float(lv.get("size_mult", 0.5))
             name = f"{name} · live"
+            if name in fb:
+                return self._skip(t, name, "whale benched (review: losing on Kalshi)")
         else:
             slip = r["max_slippage"]
         # score the bet at Kalshi's current ask
