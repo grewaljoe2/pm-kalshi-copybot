@@ -319,6 +319,37 @@ def _lag_review():
 _register("lag-review", _lag_review)
 
 
+def _window_results():
+    """Hourly: how each settled 15-minute crypto window ended today (for the fade-vs-follow study)."""
+    import json
+    time.sleep(90)
+    while True:
+        try:
+            if BOT is not None:
+                since = int(time.time()) - 30 * 3600
+                out = {}
+                for s in ("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXDOGE15M"):
+                    cur = None
+                    for _ in range(5):
+                        p = {"series_ticker": s, "status": "settled", "min_close_ts": since, "limit": 200}
+                        if cur:
+                            p["cursor"] = cur
+                        j = BOT.kdata._req("GET", "/markets", params=p)
+                        for m in j.get("markets") or []:
+                            if m.get("result") in ("yes", "no"):
+                                out[m["ticker"]] = m["result"][0]
+                        cur = j.get("cursor")
+                        if not cur:
+                            break
+                log.info("WINDOW_RESULTS %d %s", len(out), json.dumps(out, separators=(",", ":")))
+        except Exception as e:
+            log.warning("window results failed: %s", e)
+        time.sleep(3600)
+
+
+_register("window-results", _window_results)
+
+
 def _strategy(whale: str) -> str:
     w = str(whale or "")
     if w.startswith("Lag trade"):
