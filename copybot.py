@@ -1035,6 +1035,10 @@ class CopyBot:
                     self.weekly_combo(picks)
                 except Exception as e:
                     log.warning("weekly combo failed: %s", e)
+                try:
+                    self.lottery_tickets()
+                except Exception as e:
+                    log.warning("lottery tickets failed: %s", e)
             if time.time() - getattr(self, "_last_resting", 0) > self.cfg.get("limit_orders", {}).get("check_seconds", 30):
                 self._last_resting = time.time()
                 try:
@@ -2481,6 +2485,93 @@ class CopyBot:
                      row["action"], row["price"], row["count"], row["stake"], row["payout"], row["note"])
             rows.append(row)
         return rows
+
+    # ---- lottery tickets: many high-hit props in one combo for a huge payout ---- #
+    def _lottery_pool(self, lc: dict, lane: dict) -> list[dict]:
+        now, legs = time.time(), []
+        for p in getattr(self, "lottery_legs", []) or []:
+            ask, fair = float(p.get("ask") or 0), float(p.get("p") or 0)
+            if p.get("status") != "pre" or p.get("side") != "yes" or not p.get("event_ticker"):
+                continue
+            if not p.get("start") or not now + 1800 < p["start"] < now + float(lc.get("max_hours_ahead", 30)) * 3600:
+                continue
+            if fair < float(lane.get("min_leg_chance", 0.88)) or fair < ask or ask > 0.97:
+                continue  # only very likely legs, and never a leg Kalshi prices above our chance
+            ev = p["event_ticker"]
+            legs.append({"event_ticker": ev, "market_ticker": p["ticker"], "side": "yes", "fair": fair,
+                         "ask": ask, "score": p.get("score", 0), "game": ev.split("-", 1)[1] if "-" in ev else ev,
+                         "start": p.get("start"), "player": p.get("player"), "hist": p.get("hist"),
+                         "p_hist": p.get("p_hist"), "title": p["outcome"]})
+        return sorted(legs, key=lambda l: (-l["fair"], -l["score"]))
+
+    def lottery_tickets(self) -> None:
+        """Once a day per lane: one combo of many very likely player props (e.g. 25-35 legs for $2.50,
+        12-20 legs for $7.50), bought only if market makers quote it well under our hit chance."""
+        lc = self.cfg.get("lottery", {}) or {}
+        if not lc.get("enabled") or self.paused or not self.kalshi.pkey or self.mode != "live":
+            return
+        day = _today()
+        st = self.state.data.setdefault("lottery", {})
+        if st.get("day") != day:
+            st.clear()
+            st["day"] = day
+        for name, lane in (lc.get("lanes") or {}).items():
+            if st.get(name + "_done") or int(st.get(name + "_tries", 0)) >= int(lc.get("max_tries", 6)):
+                continue
+            if time.time() - float(st.get(name + "_last", 0)) < float(lc.get("retry_minutes", 60)) * 60:
+                continue
+            pool = self._lottery_pool(lc, lane)
+            cc = dict(self.cfg.get("combos", {}) or {}, max_per_game=int(lane.get("max_per_game", 4)))
+            take = []
+            for l in pool:
+                if len(take) >= int(lane["max_legs"]):
+                    break
+                if self._can_join(l, take, cc):
+                    take.append(l)
+            if len(take) < int(lane["min_legs"]):
+                if st.get(name + "_short") != len(take):
+                    st[name + "_short"] = len(take)
+                    log.info("LOTTERY %s: only %d legs at %.0f%%+ (need %d), waiting for more games/props",
+                             name, len(take), 100 * float(lane.get("min_leg_chance", 0.88)), lane["min_legs"])
+                continue
+            st[name + "_last"] = time.time()
+            st[name + "_tries"] = int(st.get(name + "_tries", 0)) + 1
+            hit = math.prod(l["fair"] for l in take)  # conservative: same-game legs that hit together get no bonus
+            for i, x in enumerate(take):
+                for y in take[i + 1:]:
+                    if x["game"] == y["game"]:
+                        hit *= min(1.0, self._pair_factor(x, y) or 0.97)
+            ratio = float(lane.get("min_value_ratio", 1.3))
+            max_px = round(hit / ratio, 5)
+            stake = float(lane["stake_usd"])
+            if self.spendable_cash() - stake < float(lc.get("keep_free_usd", 5)):
+                log.info("LOTTERY %s: not enough free cash for $%.2f", name, stake)
+                continue
+            tk, cm, errs = self._build_combo(take)
+            titles = [l["title"] for l in take]
+            if not tk:
+                log.info("LOTTERY %s %d-leg: Kalshi wouldn't build this combo (%s)", name, len(take), "; ".join(errs[-1:]))
+                continue
+            q = self.kalshi.rfq_buy_yes(tk, stake, max_px)
+            log.info("LOTTERY %s %d-leg hit %.3f%% (pays ~%.0fx at our max) max %.5f quote %s -> %s legs %s",
+                     name, len(take), 100 * hit, 1 / max_px if max_px else 0, max_px, q.get("best"), q["status"], titles)
+            if q["status"] == "filled":
+                n, px = float(q["count"]), float(q["price"])
+                fee = kalshi_fee(n, px, self.fee_rate)
+                self._commit(n * px + fee)
+                lname = f"Lottery {name}"
+                title = f"{len(take)}-leg: " + " + ".join(titles)
+                self.state.add_position(tk, "yes", n)
+                self.state.add_spent(n * px + fee)
+                self.state.open_lot(lname, tk, "yes", n, px, fee, title)
+                self.state.data["lots"][-1]["games"] = sorted({l["game"] for l in take})
+                self._journal(lname, {"title": title, "outcome": "combo", "price": hit}, Target(tk, "yes"), "buy", n, px)
+                st[name + "_done"] = True
+                log.warning("LOTTERY %s BOUGHT %d-leg x%.0f @ %.4f ($%.2f, pays $%.0f if all hit)",
+                            name, len(take), n, px, n * px, n)
+            elif q.get("accepted"):
+                st[name + "_done"] = True  # reconcile_combos books it once Kalshi shows the fill
+                self._commit(stake)
 
     def _place_combo(self, combo_tk, legs, fair, ask, price, count, take, pot: bool = False) -> bool:
         tgt = Target(combo_tk, "yes")

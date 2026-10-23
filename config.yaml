@@ -187,6 +187,28 @@ limit_orders:
 
 # Combos (parlays): strong whale picks + player props, one leg per game, each leg used once.
 # Small combos get the strongest legs; 5-6 leg combos only use elite legs (84%+ each).
+lottery:                    # daily "lottery tickets": many very likely player props in one combo
+  enabled: true
+  max_hours_ahead: 30
+  max_tries: 6              # per lane per day (a new quote request every hour until one fills)
+  retry_minutes: 60
+  keep_free_usd: 5
+  lanes:
+    monster:                # 25-35 legs, ~$2.50 -> hundreds/thousands of dollars if every leg hits
+      min_legs: 25
+      max_legs: 35
+      min_leg_chance: 0.88  # each leg 88%+ likely from the player's game log (+ market blend)
+      max_per_game: 4       # same-game legs only when their game logs show they hit together
+      stake_usd: 2.50
+      min_value_ratio: 1.3  # buy only if our hit chance is 1.3x+ the price makers quote
+    big:                    # 12-20 legs, ~$7.50
+      min_legs: 12
+      max_legs: 20
+      min_leg_chance: 0.86
+      max_per_game: 3
+      stake_usd: 7.50
+      min_value_ratio: 1.3
+
 combos:
   enabled: true
   dry_run: false            # LIVE: real orders

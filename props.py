@@ -319,7 +319,7 @@ class PropModel:
                 break
         return out
 
-    def scan(self, *, min_ask: float = 0.50, max_ask: float = 0.93, min_p: float = 0.62,
+    def scan(self, *, min_ask: float = 0.50, max_ask: float = 0.97, min_p: float = 0.62,
              hours_ahead: float = 36, nfl_hours_ahead: float = 110, min_before_s: int = 900) -> list[dict]:
         picks: list[dict] = []
         now = time.time()
@@ -401,6 +401,12 @@ class PropModel:
             if k not in best or pk["score"] > best[k]["score"]:
                 best[k] = pk
         out = sorted(best.values(), key=lambda x: (-x["score"], -x["p"]))
+        safe: dict[tuple, dict] = {}  # lottery legs: the most likely line per player+stat (not the best-rated)
+        for pk in picks:
+            k = (pk["event_ticker"], pk["player"], pk["stat"])
+            if k not in safe or pk["p"] > safe[k]["p"]:
+                safe[k] = pk
+        self.safe = sorted(safe.values(), key=lambda x: -x["p"])
         log.info("props: %d candidate props (%d after one-per-player); skipped %s", len(picks), len(out),
                  sorted(self.skips.items(), key=lambda kv: -kv[1]))
         return out
