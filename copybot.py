@@ -1545,6 +1545,9 @@ class CopyBot:
         base = name.split(" · ")[0]
         if base in (self.state.data.get("benched_whales") or {}):
             return self._skip(t, name, "whale benched (losing copy record)")
+        fb = (self.cfg.get("whale_manager", {}) or {}).get("force_bench") or []
+        if name in fb or base in fb:
+            return self._skip(t, name, "whale benched (review: losing on Kalshi)")
         m = self.kdata.market(tgt.ticker)
         if m.get("status") not in (None, "open", "active"):
             return self._skip(t, name, f"Kalshi market {m.get('status')}")
@@ -2495,7 +2498,7 @@ class CopyBot:
                 continue
             if not p.get("start") or not now + 1800 < p["start"] < now + float(lc.get("max_hours_ahead", 30)) * 3600:
                 continue
-            if fair < float(lane.get("min_leg_chance", 0.88)) or fair < ask or ask > 0.97:
+            if fair < float(lane.get("min_leg_chance", 0.88)) or fair < ask - float(lc.get("leg_price_slack", 0)) or ask > 0.97:
                 continue  # only very likely legs, and never a leg Kalshi prices above our chance
             ev = p["event_ticker"]
             legs.append({"event_ticker": ev, "market_ticker": p["ticker"], "side": "yes", "fair": fair,
