@@ -186,6 +186,24 @@ class MarketMaker:
         log.warning("MM STRAY FILL %s %s x%d @ %.2f (order %s not tracked) -> booked, exits will manage it",
                     tk, held.upper(), n, px, oid)
 
+    def _start_bg(self) -> None:
+        """Slow Kalshi housekeeping (stray-quote sweep, position check, Kalshi P&L) runs in its own thread,
+        so the trading loop (stops, take-profits, pairs) never waits on it."""
+        if getattr(self, "_bg", None):
+            return
+        import threading
+        def loop():
+            while True:
+                try:
+                    now = time.time()
+                    self.sweep(now)
+                    self.truth_stop(now)
+                except Exception as e:
+                    log.warning("MM housekeeping failed: %s", str(e)[:120])
+                time.sleep(5)
+        self._bg = threading.Thread(target=loop, name="mm-housekeeping", daemon=True)
+        self._bg.start()
+
     def sweep(self, now: float) -> None:
         """Every 20s: any resting order of ours on a market-maker market that we aren't tracking (a cancel
         that didn't really go through, or a quote left from a restart) gets cancelled and checked."""
@@ -280,7 +298,7 @@ class MarketMaker:
         st = self.mk.setdefault(tk, {"orders": {}, "inv": {"yes": [0, 0.0], "no": [0, 0.0]}, "last_poll": 0.0,
                                      "coin": m["prod"].split("-")[0], "close": m["close"], "ticker": tk})
         st["close"] = m["close"]
-        self.sweep(now)
+        self._start_bg()
         if self.cfg.get("paused"):  # no new quotes; still manage what we hold
             for side in list(st["orders"]):
                 self._cancel(tk, st, side, "paused")
@@ -301,7 +319,7 @@ class MarketMaker:
         net = inv_y - inv_n
         allow_y, allow_n, why = self.gate(m, fair, now)
         self.__dict__.setdefault("_last_gate", {})[st["coin"]] = why or f"ok fair {fair:.2f}"
-        stopped = self.daily_pnl() < -float(c.get("daily_stop_usd", 8)) or self.truth_stop(now)
+        stopped = self.daily_pnl() < -float(c.get("daily_stop_usd", 8)) or getattr(self, "_truth_off", False)
         if stopped:
             allow_y = allow_n = False
         # lean toward the side that completes a pair

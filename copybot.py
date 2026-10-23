@@ -532,15 +532,15 @@ class Kalshi:
         need = 0.0
         if action == "buy":
             need = count * (price + 0.07 * price * (1 - price)) + 0.02
-            try:
-                self.ensure_shard_funds(ticker, need)
+            try:  # resting quotes (crypto loop) must never wait on a cash transfer: fire it and move on
+                self.ensure_shard_funds(ticker, need, wait_s=0 if post_only else 12)
             except Exception as e:
                 log.warning("  shard funding check failed for %s: %s", ticker, e)
         try:
             res = self._req("POST", "/portfolio/events/orders", json=body)
         except RuntimeError as e:
             msg = str(e).lower()
-            if action != "buy" or ("shard" not in msg and "insufficient" not in msg):
+            if action != "buy" or post_only or ("shard" not in msg and "insufficient" not in msg):
                 raise
             # Cash sits in several Kalshi pools: pull it into this market's pool and retry,
             # buying fewer contracts if there still isn't enough for the full size.

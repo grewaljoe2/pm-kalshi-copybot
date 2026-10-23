@@ -562,7 +562,11 @@ class LagWatch:
             st["size_day"] = today
         pct = levels[max(0, min(len(levels) - 1, int(st.get("size_level", 0))))]
         max_open = pct * float(self.cfg.get("max_open_trades", 3))
-        truth = self.bot.truth_since_start("lag", ("BTC", "ETH")) if hasattr(self.bot, "truth_since_start") else None
+        truth = None
+        if hasattr(self.bot, "truth_since_start") and time.time() - st.get("truth_t", 0) > 300:
+            st["truth_t"] = time.time()  # at most every 5 min (uses the bot's 5-min Kalshi cache)
+            st["truth_v"] = self.bot.truth_since_start("lag", ("BTC", "ETH"))
+        truth = st.get("truth_v")
         if truth is not None and truth < -float(self.cfg.get("kill_usd", 10)):
             if st.get("truth_stopped_day") != today:
                 st["truth_stopped_day"] = today
