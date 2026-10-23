@@ -421,7 +421,10 @@ class LagWatch:
                     log.info("LAGWATCH [%s] gap %s %s: Kalshi %.2f vs fair %.3f (%.1fc)",
                              grp, p["ticker"], p["side"].upper(), k_ask, fair, 100 * gap)
                     if self.trading(grp):
-                        self._buy(p, k_ask, fair, grp)
+                        if p.get("close") and self.cfg.get("crypto_follow"):
+                            self._follow(p, fair, grp)  # bet WITH Kalshi: buy the side Kalshi favors
+                        else:
+                            self._buy(p, k_ask, fair, grp)
                 else:
                     g["max_gap"] = max(g["max_gap"], gap)
             elif g:
@@ -526,6 +529,57 @@ class LagWatch:
                                      "group": grp, "close": p.get("close"), "cond": p.get("cond")})
         log.info("LAGTRADE [%s] BUY %d %s %s @ %.2f (Polymarket %.3f)", grp, filled, p["ticker"],
                  p["side"].upper(), px, pm_mid)
+
+    def _follow(self, p: dict, fair: float, grp: str) -> None:
+        """Follow-Kalshi test (real orders, small size): when the model says Kalshi underprices a side,
+        buy the OTHER side (the one Kalshi favors) at the real ask, once per window, and hold it to
+        settlement. Study 10/22: the side the model liked won 20% vs Kalshi's 28%."""
+        if not self.cfg.get("crypto_follow") or self.bot.mode != "live" or "15M-" not in p["ticker"]:
+            return  # 15-minute windows only (what the study covered)
+        opp = "no" if p["side"] == "yes" else "yes"
+        key = f'{p["ticker"]}|{opp}'
+        with self.lock:
+            if any(x["ticker"] == p["ticker"] for x in self.stats["trades"]):
+                return  # one follow trade per window
+            ent = self.stats.setdefault("entries", {})
+            for k in [k for k, v in ent.items() if v.get("close", 0) < time.time() - 60]:
+                ent.pop(k, None)
+            if ent.get(p["ticker"], {}).get("n", 0) >= 1:
+                return
+            if p["close"] - time.time() <= float(self.cfg.get("no_entry_last_s", 150)):
+                return
+        try:
+            ask, qty = self.real_ask(p["ticker"], opp)
+        except Exception:
+            return
+        lo, hi = float(self.cfg.get("follow_min_price", 0.55)), float(self.cfg.get("follow_max_price", 0.85))
+        if ask is None or not lo <= ask <= hi or qty < 1:
+            return
+        pct, max_open, why = self.sizing(self.bot.equity())
+        if why:
+            return
+        n = int(self.cfg.get("follow_contracts", 2))
+        if self.bot.cash() < n * ask + 1:
+            return
+        self.stats.setdefault("entries", {}).setdefault(p["ticker"], {"n": 0, "close": p["close"]})["n"] += 1
+        try:  # real taker order at the real ask (what live execution actually gets)
+            o = self.bot.kalshi.create_order(p["ticker"], opp, "buy", n, round(ask, 2), "immediate_or_cancel")
+            filled = int(float(o.get("fill_count") or 0))
+        except Exception as e:
+            log.info("LAGFOLLOW buy failed %s: %s", p["ticker"], str(e)[:120])
+            return
+        if not filled:
+            log.info("LAGFOLLOW [%s] no fill at %.2f on %s %s", grp, ask, p["ticker"], opp.upper())
+            return
+        px = float(o.get("average_fill_price") or 0) or ask
+        self.bot._commit(filled * px)
+        self.bot.ledger_queue.append(("open", f"Lag follow · {grp}", p["ticker"], opp, filled, px, p["title"]))
+        with self.lock:
+            self.stats["trades"].append({"key": key, "ticker": p["ticker"], "side": opp, "count": filled, "entry": px,
+                                         "t0": time.time(), "pm_mid": round(1 - fair, 3), "title": p["title"],
+                                         "group": grp, "close": p.get("close"), "cond": p.get("cond"), "follow": True})
+        log.info("LAGFOLLOW [%s] BUY %d %s %s @ %.2f (Kalshi favors it; model said %.2f) - holding to settlement",
+                 grp, filled, p["ticker"], opp.upper(), px, 1 - fair)
 
     # ---- sizing that follows results --------------------------------------------- #
     def day_pnl(self, day: str) -> tuple[float, int]:
@@ -734,7 +788,7 @@ class LagWatch:
         if not self.cfg.get("profit_ladder", True):
             return
         with self.lock:
-            for x in [x for x in self.stats["trades"] if x["ticker"] == ticker and x.get("close")]:
+            for x in [x for x in self.stats["trades"] if x["ticker"] == ticker and x.get("close") and not x.get("follow")]:
                 fair = fair_yes if x["side"] == "yes" else 1 - fair_yes
                 bid = yes_bid if x["side"] == "yes" else 1 - yes_ask
                 if bid is None or bid < 0.02:
@@ -768,7 +822,7 @@ class LagWatch:
         """Last minutes of a crypto window: sell a trade that's probably losing (our model now gives
         it under exit_below) or when the market pays more than it's worth, instead of riding it to 0."""
         with self.lock:
-            for x in [x for x in self.stats["trades"] if x["ticker"] == ticker]:
+            for x in [x for x in self.stats["trades"] if x["ticker"] == ticker and not x.get("follow")]:
                 fair = fair_yes if x["side"] == "yes" else 1 - fair_yes
                 bid = yes_bid if x["side"] == "yes" else 1 - yes_ask
                 if bid < 0.02:
@@ -779,7 +833,7 @@ class LagWatch:
 
     def _maybe_sell(self, key: str, bid: float, rate: float, fair: float | None = None) -> None:
         from copybot import Target
-        for x in [x for x in self.stats["trades"] if x["key"] == key]:
+        for x in [x for x in self.stats["trades"] if x["key"] == key and not x.get("follow")]:
             if self._net(x["entry"], bid, rate) < float(self.cfg.get("min_profit", 0.01)):
                 continue
             # crypto windows: hold to settlement (the full gap, one fee) unless the market already pays
@@ -817,7 +871,7 @@ class LagWatch:
         moved against us) and someone pays 75%+ of that value, sell (model_stop true) or just note it."""
         live = self.cfg.get("model_stop", True)
         with self.lock:
-            for x in [x for x in self.stats.get("trades", []) if x["ticker"] == ticker]:
+            for x in [x for x in self.stats.get("trades", []) if x["ticker"] == ticker and not x.get("follow")]:
                 if (x.get("stop_px") is not None and not live) or secs_left < 300:
                     continue
                 fair = fair_yes if x["side"] == "yes" else 1 - fair_yes

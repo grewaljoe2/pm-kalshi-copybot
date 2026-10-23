@@ -118,7 +118,12 @@ lag_watch:
   stop_value_share: 0.5
   mm_keep_usd: 0           # market maker paused: lag may use all free crypto cash
   stop_reset: "2026-10-22 21:15"  # lag daily stop counts from this reset (new rules start here)
-  truth_reset: "2026-10-22 21:30"  # Kalshi-based lag limit (kill_usd) counts from here (all 5 coins)
+  truth_reset: "2026-10-22 22:45"  # Kalshi-based lag limit (kill_usd) counts from here (follow test start)
+  kill_usd: 6               # follow test: off for the day if Kalshi says crypto lag is down $6 since the reset
+  crypto_follow: true       # live test: bet WITH Kalshi when the model disagrees (real orders, hold to settlement)
+  follow_contracts: 2       # small: ~$1.10-1.70 per trade
+  follow_min_price: 0.55    # Kalshi's favorite side only, 55c-85c
+  follow_max_price: 0.85
   maker_entry: true         # crypto lag entries rest one tick under the ask (no fee) instead of buying the ask
   maker_wait_s: 30          # cancel an unfilled maker entry after 30s (or once the gap closes)
   flip_exit: false          # convergence flip: rest a sell just under model value (maker, no fee) as soon as a lag trade fills
