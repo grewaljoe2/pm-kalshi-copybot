@@ -565,12 +565,12 @@ class LagWatch:
         truth = None
         if hasattr(self.bot, "truth_since_start") and time.time() - st.get("truth_t", 0) > 300:
             st["truth_t"] = time.time()  # at most every 5 min (uses the bot's 5-min Kalshi cache)
-            st["truth_v"] = self.bot.truth_since_start("lag", ("BTC", "ETH"))
+            st["truth_v"] = self.bot.truth_since_start("lag", ("BTC", "ETH", "SOL", "XRP", "DOGE"))
         truth = st.get("truth_v")
         if truth is not None and truth < -float(self.cfg.get("kill_usd", 10)):
             if st.get("truth_stopped_day") != today:
                 st["truth_stopped_day"] = today
-                log.warning("LAG OFF for today: Kalshi says BTC/ETH lag is %+.2f after fees", truth)
+                log.warning("LAG OFF for today: Kalshi says crypto lag is %+.2f after fees", truth)
             return pct, max_open, "daily stop (Kalshi)"
         pnl_today, _ = self.day_pnl(today)
         rid = str(self.cfg.get("stop_reset", ""))
@@ -879,7 +879,7 @@ class LagWatch:
         def done(x):
             if x.get("close"):
                 return now > float(x["close"]) + 60
-            crypto = x["ticker"].startswith(("KXBTC15M", "KXETH15M", "KXBTCD", "KXETHD"))
+            crypto = x["ticker"].startswith(("KXBTC15M", "KXETH15M", "KXBTCD", "KXETHD", "KXSOL15M", "KXXRP15M", "KXDOGE15M"))
             return now - x["t0"] > (75 * 60 if crypto else 18 * 3600)
         with self.lock:
             for x in [x for x in self.stats["trades"] if done(x) and x.get("close")]:

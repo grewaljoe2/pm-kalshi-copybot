@@ -118,7 +118,7 @@ lag_watch:
   stop_value_share: 0.5
   mm_keep_usd: 0           # market maker paused: lag may use all free crypto cash
   stop_reset: "2026-10-22 21:15"  # lag daily stop counts from this reset (new rules start here)
-  truth_reset: "2026-10-22 21:15"  # Kalshi-based lag limit (kill_usd) counts from here
+  truth_reset: "2026-10-22 21:30"  # Kalshi-based lag limit (kill_usd) counts from here (all 5 coins)
   maker_entry: true         # crypto lag entries rest one tick under the ask (no fee) instead of buying the ask
   maker_wait_s: 30          # cancel an unfilled maker entry after 30s (or once the gap closes)
   flip_exit: false          # convergence flip: rest a sell just under model value (maker, no fee) as soon as a lag trade fills
@@ -141,7 +141,7 @@ crypto_lag:
   exit_below: 0.25          #   = our model gives them under 25% (or the bid pays more than they're worth)
   min_price: 0.10           # skip contracts under 10c / over 90c (model least reliable there)
   mm:                       # two-sided market making (resting YES + NO quotes around fair value)
-    enabled: true
+    enabled: false          # off 2026-10-22 9:30pm CT: SOL/XRP/DOGE handed to lag trades
     coins: [SOL, XRP, DOGE] # 15-minute markets of these coins (no lag trades there)
     size: 3                 # contracts per quote
     half_spread: 0.04       # quote 4c either side of fair value
