@@ -109,7 +109,7 @@ lag_watch:
   min_profit: 0.01          # sports lag: sell once it nets 1c+ per contract after fees
   hold_to_settle: true      # crypto lag: hold to settlement; sell early only if the bid pays at least fair value
   no_entry_last_s: 150      # crypto: no new buys in the last 2.5 minutes of a window
-  crypto_min_price: 0.10    # crypto: real order-book price must be 10c-90c
+  crypto_min_price: 0.25    # crypto: real order-book price must be 25c-75c (longshots crash fast and books get thin)
   borrow_pot: true          # lag trades may use the future pot's idle cash (back within 15 min)
   exit_min_bid_share: 0.75  # late exit only if someone pays 75%+ of model value
   profit_ladder: true       # up 10%+ -> never below break-even; 30%+ keeps 40% of gain, 60%+ 60%, 100%+ 70%
@@ -123,6 +123,7 @@ lag_watch:
   flip_exit: false          # convergence flip: rest a sell just under model value (maker, no fee) as soon as a lag trade fills
   flip_min: 0.02            # the resting exit is never below entry + 2c
   stop_c: 0.10              # cut a lag trade once its model value is 10c under cost
+  stop_min_bid_share: 0.5   # stop sells if the bid pays at least half the model value (fast collapses), retrying leftovers
   late_cut_s: 300           # last 5 min: close a losing lag trade if the loss is <= 10c, instead of riding it to settlement
 
 

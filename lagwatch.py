@@ -737,7 +737,7 @@ class LagWatch:
                     del path[:-200]
                 left = float(x["close"]) - now
                 cut = float(self.cfg.get("stop_c", 0.10))
-                if left >= 90 and fair <= x["entry"] - cut and bid >= 0.75 * fair:
+                if left >= 60 and fair <= x["entry"] - cut and bid >= float(self.cfg.get("stop_min_bid_share", 0.5)) * fair:
                     self._sell(x, bid, rate, f"(stop: worth {fair:.2f}, {100 * cut:.0f}c+ under cost {x['entry']:.2f})")
                     continue
                 if left <= float(self.cfg.get("late_cut_s", 300)) and fair < x["entry"] and bid >= x["entry"] - cut:
@@ -805,7 +805,7 @@ class LagWatch:
         live = self.cfg.get("model_stop", True)
         with self.lock:
             for x in [x for x in self.stats.get("trades", []) if x["ticker"] == ticker]:
-                if x.get("stop_px") is not None or secs_left < 300:
+                if (x.get("stop_px") is not None and not live) or secs_left < 300:
                     continue
                 fair = fair_yes if x["side"] == "yes" else 1 - fair_yes
                 bid = yes_bid if x["side"] == "yes" else 1 - yes_ask
