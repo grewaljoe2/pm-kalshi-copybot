@@ -152,10 +152,10 @@ crypto_lag:
     vol_spike: 2.0          # last-5-min volatility over 2x normal = pull quotes
     stop_before_close_s: 180
     expire_before_close_s: 150  # Kalshi cancels our quotes itself 2.5 min before close
-    daily_stop_usd: 8       # stop quoting for the day after losing $8
+    daily_stop_usd: 1000    # (old records-based stop, off: the Kalshi-based kill_usd limit is the real one)
     paused: false           # true = no new quotes; still sells/stops what it holds
     kill_usd: 10            # off for the day if Kalshi says market making is down $10 after fees (counted from the baseline)
-    truth_reset: "2026-10-22 17:07"  # change this to restart the count from now
+    truth_reset: "2026-10-22 19:30"  # change this to restart the count from now
     breaker_contracts: 6    # Kalshi order group: 6+ contracts filled within 15s -> Kalshi cancels all our quotes in that market
     open_until_left_s: 300  # last 5 min: only quotes that complete a pair (no new one-sided risk)
     pairs_only: true        # hold both sides, not one: complete a pair at once (taker) if it still costs < $0.99
