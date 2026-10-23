@@ -2526,7 +2526,12 @@ class CopyBot:
             for l in pool:
                 if len(take) >= int(lane["max_legs"]):
                     break
-                if self._can_join(l, take, cc):
+                same = [x for x in take if x["game"] == l["game"]]
+                if len(same) >= int(lane.get("max_per_game", 4)):
+                    continue
+                # same-game legs: fine unless their shared game logs show they work against each other
+                # (no shared data, e.g. opposing players, is allowed; it costs a 3% haircut in the hit chance)
+                if all((self._pair_factor(l, x) or 1.0) >= float(lane.get("min_pair_factor", 0.95)) for x in same):
                     take.append(l)
             if len(take) < int(lane["min_legs"]):
                 if st.get(name + "_short") != len(take):
