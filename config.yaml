@@ -109,7 +109,7 @@ lag_watch:
   min_profit: 0.01          # sports lag: sell once it nets 1c+ per contract after fees
   hold_to_settle: true      # crypto lag: hold to settlement; sell early only if the bid pays at least fair value
   no_entry_last_s: 150      # crypto: no new buys in the last 2.5 minutes of a window
-  crypto_min_price: 0.30    # crypto: only 30c-70c entries (today: 30c+ won 18/29, under 30c won 5/33)
+  crypto_min_price: 0.99    # crypto lag entries OFF (fade study 10/22: fade side won 20% vs Kalshi 28% / model 36%); watching + logging continue
   borrow_pot: true          # lag trades may use the future pot's idle cash (back within 15 min)
   exit_min_bid_share: 0.75  # late exit only if someone pays 75%+ of model value
   profit_ladder: true       # up 10%+ -> never below break-even; 30%+ keeps 40% of gain, 60%+ 60%, 100%+ 70%
