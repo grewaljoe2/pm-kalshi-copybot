@@ -124,6 +124,8 @@ lag_watch:
   flip_min: 0.02            # the resting exit is never below entry + 2c
   stop_c: 0.10              # cut a lag trade once its model value is 10c under cost
   stop_min_bid_share: 0.5   # stop sells if the bid pays at least half the model value (fast collapses), retrying leftovers
+  ladder_min_gain_c: 0.05   # profit ladder arms only once a lag trade is up 5c+ (not +2c on a 13c contract)
+  max_entries_per_window: 2 # at most 2 lag entries per market per window (no chasing)
   late_cut_s: 300           # last 5 min: close a losing lag trade if the loss is <= 10c, instead of riding it to settlement
 
 

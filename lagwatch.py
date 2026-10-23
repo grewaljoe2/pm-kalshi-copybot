@@ -452,6 +452,11 @@ class LagWatch:
         if any(x["key"] == key for x in self.stats["trades"]):
             return
         if p.get("close"):  # crypto windows
+            ent = self.stats.setdefault("entries", {})
+            for k in [k for k, v in ent.items() if v.get("close", 0) < time.time() - 60]:
+                ent.pop(k, None)
+            if ent.get(p["ticker"], {}).get("n", 0) >= int(self.cfg.get("max_entries_per_window", 2)):
+                return  # already traded this window enough: no chasing a falling price
             if p["close"] - time.time() <= float(self.cfg.get("no_entry_last_s", 150)):
                 return  # inside the late-exit zone: a buy here would just be sold again at a loss
             lo = float(self.cfg.get("crypto_min_price", 0.10))
@@ -484,6 +489,8 @@ class LagWatch:
                 log.info("LAGTRADE maker order failed %s: %s", p["ticker"], str(e)[:120])
                 return
             if o.get("order_id"):
+                e = self.stats.setdefault("entries", {}).setdefault(p["ticker"], {"n": 0, "close": p["close"]})
+                e["n"] += 1
                 bot._commit(n * px)
                 self.stats.setdefault("pending", []).append({"id": o["order_id"], "key": key, "p": p, "n": n, "px": px,
                                                              "filled": 0, "t0": time.time(), "grp": grp, "pm_mid": pm_mid})
@@ -744,6 +751,8 @@ class LagWatch:
                     self._sell(x, bid, rate, f"(late cut: worth {fair:.2f} < cost {x['entry']:.2f}, small loss)")
                     continue
                 floor = profit_floor(x["entry"], x["peak"], rate)
+                if x["peak"] - x["entry"] < float(self.cfg.get("ladder_min_gain_c", 0.05)):
+                    floor = None  # not up enough in cents yet: let stops/take-profit handle it
                 if floor is None or bid > floor:
                     continue
                 if fair > floor + float(self.cfg.get("ladder_model_margin", 0.08)):
