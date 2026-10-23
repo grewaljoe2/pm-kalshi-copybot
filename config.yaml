@@ -116,8 +116,9 @@ lag_watch:
   ladder_model_margin: 0.08 # skip the stop if the model still values it 8c+ above the floor (a book dip)
   model_stop: true          # 5+ min left: sell if the model values the trade at half the entry or less (and bid pays 75%+ of that)
   stop_value_share: 0.5
-  mm_keep_usd: 15          # lag trades always leave $15 for the market maker (it may use any free cash beyond that)
-  stop_reset: "2026-10-22 18:56"  # lag daily stop counts from this reset (change to reset again)
+  mm_keep_usd: 0           # market maker paused: lag may use all free crypto cash
+  stop_reset: "2026-10-22 21:15"  # lag daily stop counts from this reset (new rules start here)
+  truth_reset: "2026-10-22 21:15"  # Kalshi-based lag limit (kill_usd) counts from here
   maker_entry: true         # crypto lag entries rest one tick under the ask (no fee) instead of buying the ask
   maker_wait_s: 30          # cancel an unfilled maker entry after 30s (or once the gap closes)
   flip_exit: false          # convergence flip: rest a sell just under model value (maker, no fee) as soon as a lag trade fills
