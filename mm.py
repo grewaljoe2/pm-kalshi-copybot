@@ -24,6 +24,9 @@ import time
 log = logging.getLogger("mm")
 
 
+import threading as _th
+_MM_LOCK = _th.RLock()  # one MM actor at a time: worker, housekeeping and fill feed never race
+
 class MarketMaker:
     def __init__(self, bot, crypto, cfg: dict):
         self.bot, self.cl, self.cfg = bot, crypto, cfg or {}
@@ -152,6 +155,10 @@ class MarketMaker:
             log.warning("MM orphan check failed: %s", e)
 
     def on_ws_fill(self, f: dict) -> None:
+        with _MM_LOCK:
+            return self._on_ws_fill(f)
+
+    def _on_ws_fill(self, f: dict) -> None:
         """Live fill feed: a fill on one of our market-maker markets from an order this run isn't tracking
         (a quote left over from a restart, or a cancel that didn't take) goes straight into the records."""
         tk, oid = f.get("market_ticker") or f.get("ticker") or "", f.get("order_id")
@@ -189,7 +196,7 @@ class MarketMaker:
     def feed(self, tk, m, fy, q, now) -> None:
         """Latest prices for a market from the crypto loop; a per-coin worker thread does the trading."""
         import threading
-        coin = m["prod"].split("-")[0]
+        coin = "all"  # one worker for all MM coins, in turn (separate threads raced and tripped Kalshi's rate limit)
         self.__dict__.setdefault("_latest", {})[tk] = (m, fy, dict(q), now)
         workers = self.__dict__.setdefault("_workers", {})
         if coin in workers and workers[coin].is_alive():
@@ -198,14 +205,13 @@ class MarketMaker:
             while True:
                 try:
                     for t, (mm_, f, qq, ts) in list(self._latest.items()):
-                        if mm_["prod"].split("-")[0] != coin:
-                            continue
                         if time.time() > mm_["close"] + 5:
                             self._latest.pop(t, None)
                             continue
                         if time.time() - ts > 3:
                             continue  # stale prices: wait for fresh ones
-                        self.step(t, mm_, f, qq, time.time())
+                        with _MM_LOCK:
+                            self.step(t, mm_, f, qq, time.time())
                 except Exception as e:
                     log.warning("mm %s worker step failed: %s", coin, str(e)[:120])
                 time.sleep(0.25)
@@ -224,8 +230,9 @@ class MarketMaker:
             while True:
                 try:
                     now = time.time()
-                    self.sweep(now)
-                    self.truth_stop(now)
+                    with _MM_LOCK:
+                        self.sweep(now)
+                        self.truth_stop(now)
                 except Exception as e:
                     log.warning("MM housekeeping failed: %s", str(e)[:120])
                 time.sleep(5)
