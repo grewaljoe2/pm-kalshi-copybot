@@ -2554,8 +2554,10 @@ class CopyBot:
             ratio = float(lane.get("min_value_ratio", 1.3))
             max_px = round(hit / ratio, 5)
             stake = float(lane["stake_usd"])
-            if self.spendable_cash() - stake < float(lc.get("keep_free_usd", 5)):
-                log.info("LOTTERY %s: not enough free cash for $%.2f (free $%.2f)", name, stake, self.spendable_cash())
+            from_pot = bool(lc.get("use_pot", True)) and self.pot_free() >= stake  # long-shot money: the future pot
+            if not from_pot and self.spendable_cash() - stake < float(lc.get("keep_free_usd", 5)):
+                log.info("LOTTERY %s: not enough free cash for $%.2f (free $%.2f, pot $%.2f)", name, stake,
+                         self.spendable_cash(), self.pot_free())
                 st[name + "_tries"] -= 1  # a cash wait doesn't use up one of today's tries
                 continue
             tk, cm, errs = self._build_combo(take)
@@ -2576,6 +2578,8 @@ class CopyBot:
                 self.state.add_spent(n * px + fee)
                 self.state.open_lot(lname, tk, "yes", n, px, fee, title)
                 self.state.data["lots"][-1]["games"] = sorted({l["game"] for l in take})
+                if from_pot:
+                    self._pot_take(self.state.data["lots"][-1])
                 self._journal(lname, {"title": title, "outcome": "combo", "price": hit}, Target(tk, "yes"), "buy", n, px)
                 st[name + "_done"] = True
                 log.warning("LOTTERY %s BOUGHT %d-leg x%.0f @ %.4f ($%.2f, pays $%.0f if all hit)",

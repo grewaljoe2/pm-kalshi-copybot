@@ -196,11 +196,12 @@ limit_orders:
 # Small combos get the strongest legs; 5-6 leg combos only use elite legs (84%+ each).
 lottery:                    # daily "lottery tickets": many very likely player props in one combo
   enabled: true
-  reset_id: "2026-10-23b"   # change to restart today's tries
+  reset_id: "2026-10-23c"   # change to restart today's tries
   max_hours_ahead: 30
   max_tries: 6              # per lane per day (a new quote request every hour until one fills)
   retry_minutes: 60
   keep_free_usd: 5
+  use_pot: true             # 10/23: lottery tickets are paid from the future pot when it has room
   leg_price_slack: 0.02     # a leg may cost up to 2c more than our hit chance (the whole ticket still needs 1.3x value)
   lanes:
     monster:                # 25-35 legs, ~$2.50 -> hundreds/thousands of dollars if every leg hits
