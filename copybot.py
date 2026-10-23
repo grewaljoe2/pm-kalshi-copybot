@@ -2513,7 +2513,7 @@ class CopyBot:
                 k = (l["event_ticker"], l.get("player"), l["title"].split("+ ")[-1] if "+ " in l["title"] else l["title"])
                 if k not in best or l["ask"] < best[k]["ask"]:
                     best[k] = l
-            legs = list(best.values())
+            return sorted(best.values(), key=lambda l: (l["ask"], -l["fair"]))  # cheapest (biggest payout) legs first
         else:
             best = {}
             for l in legs:
