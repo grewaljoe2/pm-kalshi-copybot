@@ -89,6 +89,7 @@ parlay_lock:
 # Live lag watcher: does Kalshi trail Polymarket's price during games?
 lag_watch:
   enabled: true
+  trade_off: true          # 10/23: ALL lag trading off (sports + crypto); still watches and logs gaps
   mode: watch               # starts measuring only; switches itself to trade when the evidence is in
   auto_switch: true
   min_gaps: 8               # evidence needed: at least 8 gaps

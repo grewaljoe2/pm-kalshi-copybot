@@ -303,6 +303,8 @@ class LagWatch:
         return self.stats["groups"].setdefault(name, {"gaps": 0, "converged": 0, "games": [], "mode": "watch"})
 
     def trading(self, group: str) -> bool:
+        if self.cfg.get("trade_off"):
+            return False  # all lag trading off (watch + log only)
         return self._g(group).get("mode") == "trade"
 
     # ---- loop ----------------------------------------------------------------- #
