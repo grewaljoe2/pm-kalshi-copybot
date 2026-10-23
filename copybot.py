@@ -2517,9 +2517,9 @@ class CopyBot:
             return
         day = _today()
         st = self.state.data.setdefault("lottery", {})
-        if st.get("day") != day:
+        if st.get("day") != day or st.get("rid") != str(lc.get("reset_id", "")):
             st.clear()
-            st["day"] = day
+            st["day"], st["rid"] = day, str(lc.get("reset_id", ""))
         for name, lane in (lc.get("lanes") or {}).items():
             if st.get(name + "_done") or int(st.get(name + "_tries", 0)) >= int(lc.get("max_tries", 6)):
                 continue
@@ -2555,7 +2555,8 @@ class CopyBot:
             max_px = round(hit / ratio, 5)
             stake = float(lane["stake_usd"])
             if self.spendable_cash() - stake < float(lc.get("keep_free_usd", 5)):
-                log.info("LOTTERY %s: not enough free cash for $%.2f", name, stake)
+                log.info("LOTTERY %s: not enough free cash for $%.2f (free $%.2f)", name, stake, self.spendable_cash())
+                st[name + "_tries"] -= 1  # a cash wait doesn't use up one of today's tries
                 continue
             tk, cm, errs = self._build_combo(take)
             titles = [l["title"] for l in take]
